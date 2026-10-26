@@ -1,0 +1,13 @@
+fastapi>=0.141.1
+uvicorn>=0.52.0
+pydantic>=2.13.4
+pydantic-settings>=2.14.1
+networkx>=3.4.2
+numpy>=2.2.6
+scipy>=1.15.3
+scikit-learn>=1.7.2
+qdrant-client>=1.20.0
+pypdf>=6.21.2
+httpx>=0.28.1
+pytest>=9.1.1
+python-multipart>=0.0.9

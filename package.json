@@ -1,0 +1,15 @@
+{
+  "name": "automated-graphrag",
+  "version": "1.0.0",
+  "description": "Production-oriented Automated GraphRAG Enterprise Workspace with Tailwind CSS v3 Design System",
+  "private": true,
+  "scripts": {
+    "start": "python launch.py",
+    "build:css": "tailwindcss -i ./frontend/input.css -o ./frontend/styles.css --minify",
+    "watch:css": "tailwindcss -i ./frontend/input.css -o ./frontend/styles.css --watch",
+    "test": "pytest -v"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

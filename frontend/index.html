@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Automated GraphRAG — Enterprise Knowledge Graph & Evidence Workspace</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="min-h-screen flex flex-col lg:flex-row">
+  <!-- Skip to Main Content Link for Keyboard Accessibility -->
+  <a href="#main-workspace" class="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 btn-primary">
+    Skip to main workspace
+  </a>
+
+  <!-- Mobile Top Header (Visible below lg breakpoint) -->
+  <header class="lg:hidden flex items-center justify-between px-4 py-3 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-30">
+    <div class="flex items-center gap-2.5">
+      <div class="w-8 h-8 rounded-lg bg-brand-600 text-white font-bold flex items-center justify-center text-sm shadow-sm" aria-hidden="true">G</div>
+      <div>
+        <span class="font-bold text-sm tracking-tight block">Automated GraphRAG</span>
+        <span class="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">v1.0 • Evidence-Grounded</span>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <button type="button" id="btn-mobile-theme" class="btn-outline btn-xs" aria-label="Toggle color theme">
+        Theme
+      </button>
+      <button type="button" id="btn-mobile-menu" class="btn-outline btn-xs" aria-expanded="false" aria-controls="app-sidebar">
+        Menu
+      </button>
+    </div>
+  </header>
+
+  <!-- Sidebar Navigation -->
+  <aside id="app-sidebar" class="hidden lg:flex flex-col justify-between w-full lg:w-72 shrink-0 bg-white dark:bg-slate-900 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 p-4 lg:min-h-screen z-20">
+    <div>
+      <!-- Brand Header -->
+      <div class="hidden lg:flex items-center justify-between pb-4 mb-4 border-b border-slate-200/80 dark:border-slate-800">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-xl bg-brand-600 text-white font-extrabold flex items-center justify-center text-base shadow-sm" aria-hidden="true">
+            G
+          </div>
+          <div>
+            <h1 class="text-sm font-bold tracking-tight text-slate-900 dark:text-slate-100">Automated GraphRAG</h1>
+            <span class="text-xs font-medium text-emerald-600 dark:text-emerald-400">v1.0 • Evidence-Grounded</span>
+          </div>
+        </div>
+        <button type="button" id="btn-theme-toggle" class="btn-outline btn-xs" aria-label="Switch between dark and light theme" title="Switch theme">
+          <span id="theme-label">Light</span>
+        </button>
+      </div>
+
+      <!-- Primary Route Navigation -->
+      <nav aria-label="Primary Workspace Navigation" class="space-y-1">
+        <button type="button" class="nav-item nav-item-active" data-tab="overview" aria-current="page">
+          <svg class="w-4 h-4 shrink-0" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
+          <span>Overview Dashboard</span>
+        </button>
+        <button type="button" class="nav-item" data-tab="documents">
+          <svg class="w-4 h-4 shrink-0" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/></svg>
+          <span>Document Library</span>
+        </button>
+        <button type="button" class="nav-item" data-tab="explorer">
+          <svg class="w-4 h-4 shrink-0" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="12" cy="18" r="3"/><path d="M8.5 7.5 11 15.5M15.5 7.5 13 15.5M9 6h6"/></svg>
+          <span>Knowledge Graph Explorer</span>
+        </button>
+        <button type="button" class="nav-item" data-tab="query">
+          <svg class="w-4 h-4 shrink-0" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          <span>Query &amp; Citations</span>
+        </button>
+        <button type="button" class="nav-item" data-tab="evaluation">
+          <svg class="w-4 h-4 shrink-0" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+          <span>GraphRAG vs Vector Eval</span>
+        </button>
+        <button type="button" class="nav-item" data-tab="jobs">
+          <svg class="w-4 h-4 shrink-0" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4"/></svg>
+          <span>Pipeline &amp; Observability</span>
+        </button>
+        <button type="button" id="nav-item-users" class="nav-item" data-tab="users">
+          <svg class="w-4 h-4 shrink-0" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span class="flex-1 text-left">User Management</span>
+          <span class="badge-brand text-[10px] py-0 px-1.5">RBAC</span>
+        </button>
+        <button type="button" class="nav-item" data-tab="config">
+          <svg class="w-4 h-4 shrink-0" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Settings &amp; Security</span>
+        </button>
+      </nav>
+    </div>
+
+    <!-- Active Principal / Session & Tenant RBAC Controls -->
+    <div class="mt-6 pt-4 border-t border-slate-200 dark:border-slate-800 space-y-3">
+      <div id="principal-badge" class="rounded-lg border border-emerald-200 dark:border-emerald-800/70 bg-emerald-50/70 dark:bg-emerald-950/40 px-3 py-2.5 text-xs text-emerald-800 dark:text-emerald-300 font-medium" role="status" aria-live="polite">
+        Verifying caller identity...
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button type="button" id="btn-open-password-modal" class="btn-outline btn-xs flex-1" title="Change account password">
+          Password
+        </button>
+        <button type="button" id="btn-logout" class="btn-outline btn-xs text-rose-600 dark:text-rose-400 flex-1" title="Sign out and revoke session">
+          Sign Out
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content Area -->
+  <main id="main-workspace" class="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full">
+    <!-- Dynamic Page Header -->
+    <header class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-5 mb-6 border-b border-slate-200 dark:border-slate-800">
+      <div>
+        <div class="flex items-center gap-2 text-xs font-medium text-slate-500 dark:text-slate-400 mb-1">
+          <span>Workspace</span>
+          <span aria-hidden="true">/</span>
+          <span id="page-breadcrumb" class="text-brand-600 dark:text-brand-400 font-semibold">Overview</span>
+        </div>
+        <h2 id="page-title" class="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
+          Overview Dashboard
+        </h2>
+        <p id="page-subtitle" class="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5">
+          Verified operational metrics from the transactional SQLite + NetworkX Knowledge Graph and Hybrid Vector Store.
+        </p>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2.5">
+        <button type="button" id="btn-load-demo" class="btn-secondary" title="Ingest 3 clearly labeled synthetic enterprise documents">
+          <span>Load Synthetic Demo Corpus (3 Docs)</span>
+        </button>
+        <button type="button" id="btn-refresh" class="btn-outline" aria-label="Refresh current view">
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- RBAC Read-Only Notice Banner (Shown automatically when role === 'viewer') -->
+    <div id="rbac-readonly-banner" class="hidden mb-5 rounded-xl border border-amber-300 dark:border-amber-800/80 bg-amber-50/90 dark:bg-amber-950/40 px-4 py-3 text-xs text-amber-900 dark:text-amber-200 flex items-center justify-between gap-3" role="status">
+      <div>
+        <strong class="font-semibold">Read-Only Viewer Scope Active:</strong>
+        Document uploads, deletions, demo ingestion, benchmark runs, and configuration changes are disabled for the <code>viewer</code> role and enforced by backend RBAC.
+      </div>
+      <span class="badge-warning shrink-0">VIEWER ROLE</span>
+    </div>
+
+    <!-- Global Status / Alert Notification Banner -->
+    <div id="global-banner" class="hidden mb-5 rounded-xl border px-4 py-3 text-sm flex items-center justify-between gap-3" role="status" aria-live="polite">
+      <span id="global-banner-text"></span>
+      <button type="button" id="btn-dismiss-banner" class="text-xs font-semibold underline opacity-80 hover:opacity-100" aria-label="Dismiss notification">
+        Dismiss
+      </button>
+    </div>
+
+    <!-- ================================================================== -->
+    <!-- TAB 1: OVERVIEW DASHBOARD                                          -->
+    <!-- ================================================================== -->
+    <section id="tab-overview" class="tab-panel space-y-6" aria-labelledby="page-title">
+      <!-- Architecture & Plain-Language Concepts Onboarding Guide -->
+      <details class="surface-card p-4 group cursor-pointer transition-all border-brand-200/80 dark:border-brand-900/60 bg-gradient-to-r from-white via-white to-brand-50/30 dark:from-slate-900 dark:via-slate-900 dark:to-brand-950/20 shadow-xs">
+        <summary class="flex items-center justify-between text-xs sm:text-sm font-semibold text-slate-900 dark:text-slate-100 list-none select-none">
+          <div class="flex items-center gap-2.5">
+            <span class="inline-flex items-center justify-center w-6 h-6 rounded-md bg-brand-100 dark:bg-brand-900/60 text-brand-700 dark:text-brand-300 text-xs font-bold">ℹ</span>
+            <span>New to GraphRAG? Understand Knowledge Graphs vs. Conventional Vector RAG</span>
+          </div>
+          <span class="badge-brand text-[10px] group-open:rotate-180 transition-transform">Architecture Guide ▾</span>
+        </summary>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4 mt-3 border-t border-slate-200/80 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-300 cursor-default">
+          <div class="space-y-1.5 p-3 rounded-lg bg-slate-50 dark:bg-slate-950/50 border border-slate-200/70 dark:border-slate-800/80">
+            <h4 class="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-brand-500"></span>
+              Knowledge Graph
+            </h4>
+            <p class="leading-relaxed">A structured network of real-world entities (Systems, Organizations, Events) connected by verified relationships with verbatim source quotes.</p>
+          </div>
+          <div class="space-y-1.5 p-3 rounded-lg bg-slate-50 dark:bg-slate-950/50 border border-slate-200/70 dark:border-slate-800/80">
+            <h4 class="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+              Multi-Hop Cross-Doc Reasoning
+            </h4>
+            <p class="leading-relaxed">Conventional vector RAG fails when the answer spans across documents without shared keywords. Graph paths connect causal cascades across independent files.</p>
+          </div>
+          <div class="space-y-1.5 p-3 rounded-lg bg-slate-50 dark:bg-slate-950/50 border border-slate-200/70 dark:border-slate-800/80">
+            <h4 class="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full bg-amber-500"></span>
+              Zero-Fabrication Grounding
+            </h4>
+            <p class="leading-relaxed">Every generated claim must be backed by citation tags <code class="font-mono text-[10px]">[1]</code> and graph paths <code class="font-mono text-[10px]">[G1]</code>. When evidence is missing, the system abstains instead of guessing.</p>
+          </div>
+        </div>
+      </details>
+
+      <div id="overview-kpi-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+        <!-- Populated dynamically by loadOverview() -->
+      </div>
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div class="surface-card p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Entity Distribution by Schema Type</h3>
+            <span class="badge-neutral">Allowlisted Node Labels</span>
+          </div>
+          <div id="entity-type-bars" class="space-y-2.5"></div>
+        </div>
+
+        <div class="surface-card p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Relationship Distribution by Type</h3>
+            <span class="badge-neutral">Provenance-Backed Edges</span>
+          </div>
+          <div id="rel-type-bars" class="space-y-2.5"></div>
+        </div>
+      </div>
+
+      <div class="surface-card p-5">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Detected Thematic Communities &amp; Global Summaries</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400">Greedy modularity clusters used to ground global and cross-document analytical queries.</p>
+          </div>
+          <button type="button" class="btn-outline btn-xs self-start" data-jump-tab="explorer">
+            Explore in Graph View →
+          </button>
+        </div>
+        <div id="overview-communities" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- TAB 2: DOCUMENT LIBRARY                                            -->
+    <!-- ================================================================== -->
+    <section id="tab-documents" class="tab-panel hidden space-y-6" aria-labelledby="page-title">
+      <div class="surface-card p-5">
+        <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Ingest &amp; Index Source Document</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Accepted formats: <code class="font-mono">.md</code>, <code class="font-mono">.txt</code>, <code class="font-mono">.pdf</code>, <code class="font-mono">.json</code>, <code class="font-mono">.csv</code> (max 10 MB). Validates MIME type, encoding, and extracts schema-validated entities &amp; relationships.
+            </p>
+          </div>
+        </div>
+
+        <form id="upload-form" class="mt-4 grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+          <div class="sm:col-span-6">
+            <label for="file-input" class="form-label">Select Document File</label>
+            <input type="file" id="file-input" accept=".txt,.md,.pdf,.json,.csv" required class="form-input text-xs file:mr-3 file:py-1 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-brand-50 file:text-brand-700 dark:file:bg-brand-950 dark:file:text-brand-300" />
+          </div>
+          <div class="sm:col-span-3">
+            <label for="upload-visibility" class="form-label">Access Scope (ACL)</label>
+            <select id="upload-visibility" class="form-input text-xs py-2">
+              <option value="tenant">Tenant-Wide (All Roles)</option>
+              <option value="restricted">Analysts &amp; Admins Only</option>
+              <option value="private">Private (Owner &amp; Admins)</option>
+            </select>
+          </div>
+          <div class="sm:col-span-3 flex justify-end">
+            <button type="submit" id="btn-upload" class="btn-primary w-full">
+              Upload &amp; Index Document
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div class="surface-card p-5 space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Tenant Document Repository</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400">Re-uploading an updated file idempotently refreshes its chunks, graph edges, and communities.</p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <div>
+              <label for="doc-search-input" class="sr-only">Filter documents by filename</label>
+              <input type="text" id="doc-search-input" placeholder="Search filename or SHA..." class="form-input text-xs py-1.5 w-48" />
+            </div>
+            <div>
+              <label for="doc-status-filter" class="sr-only">Filter by status</label>
+              <select id="doc-status-filter" class="form-input text-xs py-1.5 w-40">
+                <option value="all">All Documents</option>
+                <option value="completed">Completed Only</option>
+                <option value="demo">Synthetic Demo Only</option>
+                <option value="failed">Failed Only</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div id="documents-table-container"></div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- TAB 3: KNOWLEDGE GRAPH EXPLORER                                    -->
+    <!-- ================================================================== -->
+    <section id="tab-explorer" class="tab-panel hidden space-y-6" aria-labelledby="page-title">
+      <!-- Accessible Filter Bar -->
+      <div class="surface-card p-4">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end">
+          <div class="lg:col-span-2">
+            <label for="graph-search" class="form-label">Search Entity, Alias, or Description</label>
+            <input type="text" id="graph-search" placeholder="e.g., Helios Payment Gateway, HPG, DORA..." class="form-input" />
+          </div>
+          <div>
+            <label for="graph-entity-type" class="form-label">Entity Type</label>
+            <select id="graph-entity-type" class="form-input">
+              <option value="">All Entity Types</option>
+              <option value="ORGANIZATION">ORGANIZATION</option>
+              <option value="SYSTEM">SYSTEM</option>
+              <option value="EVENT">EVENT</option>
+              <option value="METRIC">METRIC</option>
+              <option value="POLICY">POLICY</option>
+              <option value="LOCATION">LOCATION</option>
+              <option value="PERSON">PERSON</option>
+              <option value="TECHNOLOGY">TECHNOLOGY</option>
+              <option value="DATE">DATE</option>
+            </select>
+          </div>
+          <div>
+            <label for="graph-rel-type" class="form-label">Relationship Type</label>
+            <select id="graph-rel-type" class="form-input">
+              <option value="">All Relationship Types</option>
+              <option value="DEPENDS_ON">DEPENDS_ON</option>
+              <option value="CAUSED_BY">CAUSED_BY</option>
+              <option value="OPERATES">OPERATES</option>
+              <option value="IMPACTS">IMPACTS</option>
+              <option value="ACQUIRED">ACQUIRED</option>
+              <option value="PARTNERED_WITH">PARTNERED_WITH</option>
+              <option value="REGULATED_BY">REGULATED_BY</option>
+              <option value="DEVELOPED_BY">DEVELOPED_BY</option>
+              <option value="REPORTED_METRIC">REPORTED_METRIC</option>
+              <option value="LOCATED_IN">LOCATED_IN</option>
+              <option value="SUCCEEDED_BY">SUCCEEDED_BY</option>
+              <option value="ASSOCIATED_WITH">ASSOCIATED_WITH</option>
+            </select>
+          </div>
+          <div class="flex items-center gap-2">
+            <button type="button" id="btn-filter-graph" class="btn-primary flex-1">Apply Filter</button>
+            <button type="button" id="btn-reset-graph-filter" class="btn-outline" title="Clear filters">Reset</button>
+          </div>
+        </div>
+
+        <div class="mt-3 pt-3 border-t border-slate-200/70 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div class="flex flex-wrap items-center gap-4">
+            <label class="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300 font-medium">
+              <input type="checkbox" id="graph-include-inferred" checked class="rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
+              <span>Include Model-Inferred Edges (dashed)</span>
+            </label>
+            <label class="inline-flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300 font-medium">
+              <input type="checkbox" id="graph-show-edge-labels" class="rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
+              <span>Show All Edge Labels</span>
+            </label>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3 text-slate-600 dark:text-slate-400">
+            <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-blue-500"></span>Org</span>
+            <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>System</span>
+            <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-rose-500"></span>Event</span>
+            <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-amber-500"></span>Policy</span>
+            <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-pink-500"></span>Metric</span>
+            <span class="inline-flex items-center gap-1"><span class="w-2.5 h-2.5 rounded-full bg-purple-500"></span>Location</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Graph Canvas + Provenance Inspector Split Layout -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div class="lg:col-span-7 surface-card p-4 flex flex-col">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <span id="graph-stats-badge" class="badge-neutral font-mono">0 nodes • 0 edges</span>
+            <div class="flex items-center gap-1.5" role="group" aria-label="Graph viewport controls">
+              <button type="button" id="btn-zoom-in" class="btn-outline btn-xs" aria-label="Zoom in graph">+</button>
+              <button type="button" id="btn-zoom-out" class="btn-outline btn-xs" aria-label="Zoom out graph">−</button>
+              <button type="button" id="btn-zoom-reset" class="btn-outline btn-xs">Reset View</button>
+            </div>
+          </div>
+
+          <div class="relative rounded-lg border border-slate-800 bg-slate-950 graph-canvas-bg overflow-hidden shadow-inner">
+            <svg id="graph-svg" viewBox="0 0 880 540" class="w-full h-[460px] sm:h-[520px] cursor-grab select-none" role="region" aria-label="Interactive Knowledge Graph visualization"></svg>
+          </div>
+          <!-- Topology Legend Bar -->
+          <div class="mt-3 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600 dark:text-slate-400">
+            <div class="flex flex-wrap items-center gap-3">
+              <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-0.5 bg-slate-400"></span><strong class="text-slate-700 dark:text-slate-300">Solid:</strong> Explicit Claim</span>
+              <span class="inline-flex items-center gap-1.5"><span class="w-3.5 h-0.5 border-t border-dashed border-purple-400"></span><strong class="text-slate-700 dark:text-slate-300">Dashed:</strong> Inferred Link</span>
+              <span class="inline-flex items-center gap-1.5"><span class="text-xs">►</span><strong class="text-slate-700 dark:text-slate-300">Arrow:</strong> Direction of Influence</span>
+            </div>
+            <span class="text-slate-500 hidden sm:inline">Pan: Drag • Zoom: Wheel • Evidence: Click Node/Edge</span>
+          </div>
+        </div>
+
+        <div class="lg:col-span-5 surface-card p-5 flex flex-col min-h-[520px] max-h-[640px]">
+          <div class="flex items-center justify-between pb-3 mb-3 border-b border-slate-200 dark:border-slate-800">
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Provenance &amp; Entity Inspector</h3>
+            <span class="badge-brand">Traceable Evidence</span>
+          </div>
+          <div id="graph-inspector-content" class="overflow-y-auto pr-1 space-y-3 text-sm flex-1">
+            <div class="text-center py-12 px-4 text-slate-500 dark:text-slate-400 text-xs">
+              Select any entity node or relationship edge in the canvas to inspect its canonical name, aliases, confidence score, source document, chunk ID, and verbatim evidence quote.
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Uncertain Entity Resolution Matches -->
+      <div class="surface-card p-5 space-y-3">
+        <div>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Tracked Uncertain Entity Resolution Matches (Held Back from Auto-Merge)</h3>
+          <p class="text-xs text-slate-500 dark:text-slate-400">
+            Entities with similar surface names but distinct version numbers (<code class="font-mono">v2.4</code> vs <code class="font-mono">v1.9</code>) or regional qualifiers (<code class="font-mono">US</code> vs <code class="font-mono">UK</code>) are preserved separately to prevent graph corruption.
+          </p>
+        </div>
+        <div id="uncertain-matches-container"></div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- TAB 4: QUERY & CITATION WORKSPACE                                  -->
+    <!-- ================================================================== -->
+    <section id="tab-query" class="tab-panel hidden space-y-6" aria-labelledby="page-title">
+      <div class="surface-card p-5 space-y-4">
+        <div>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Evidence-Grounded Analytical Query</h3>
+          <p class="text-xs text-slate-500 dark:text-slate-400">
+            Combines dense vector search, BM25 lexical matching, multi-hop knowledge graph path traversal, and global community summaries. Explicitly abstains when evidence is insufficient.
+          </p>
+        </div>
+
+        <!-- Preset Representative Prompts -->
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs font-semibold text-slate-500 dark:text-slate-400">Representative Queries:</span>
+          <button type="button" class="chip-btn btn-secondary btn-xs" data-q="How did Incident INC-2026-041 cascade to impact downstream bank penalties and which holding company acquired the developer of Chronos Consensus Engine v2.4?">
+            1. Multi-Hop Cross-Doc Cascade
+          </button>
+          <button type="button" class="chip-btn btn-secondary btn-xs" data-q="What uptime SLA metrics were reported for Helios Payment Gateway in Q4 2026?">
+            2. Contradictory Metric Detection
+          </button>
+          <button type="button" class="chip-btn btn-secondary btn-xs" data-q="Summarize the overall themes, key entity clusters, and systemic risks across all documents.">
+            3. Global Community Summary
+          </button>
+          <button type="button" class="chip-btn btn-secondary btn-xs" data-q="What was the Q1 2025 cryptocurrency mining revenue of Quantum Nebula BioLabs on Mars?">
+            4. Unanswerable Abstention Check
+          </button>
+        </div>
+
+        <form id="query-form" class="space-y-4">
+          <div>
+            <label for="query-input" class="form-label">Analytical Question</label>
+            <textarea id="query-input" rows="3" required placeholder="Ask a multi-hop, temporal, regulatory, or global thematic question across your documents..." class="form-input"></textarea>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 items-end">
+            <div>
+              <label for="query-strategy" class="form-label">Retrieval Strategy</label>
+              <select id="query-strategy" class="form-input">
+                <option value="auto">Auto Router (Recommended)</option>
+                <option value="hybrid">Hybrid GraphRAG (Vector + BM25 + KG + Communities)</option>
+                <option value="local">Local Entity Multi-Hop Graph + Chunks</option>
+                <option value="global">Global Community Summaries + Chunks</option>
+                <option value="vector_only">Baseline Vector-Only RAG (No Graph)</option>
+              </select>
+            </div>
+
+            <div>
+              <label for="query-hops" class="form-label">Max Graph Traversal Hops</label>
+              <select id="query-hops" class="form-input">
+                <option value="1">1 Hop (Direct Neighbors)</option>
+                <option value="2" selected>2 Hops (Multi-Doc Chains)</option>
+                <option value="3">3 Hops (Deep Cascade)</option>
+              </select>
+            </div>
+
+            <div class="pb-2">
+              <label class="inline-flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700 dark:text-slate-300">
+                <input type="checkbox" id="query-inferred" checked class="rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
+                <span>Allow Model-Inferred Edges</span>
+              </label>
+            </div>
+
+            <div class="flex justify-end">
+              <button type="submit" id="btn-run-query" class="btn-primary w-full sm:w-auto">
+                Run Grounded Query
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+
+      <!-- Query Results Container -->
+      <div id="query-result-container" class="hidden space-y-6">
+        <div class="surface-card p-5 space-y-4">
+          <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800">
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Synthesized Evidence-Grounded Response</h3>
+            <div id="query-telemetry-badges" class="flex flex-wrap items-center gap-2"></div>
+          </div>
+
+          <div id="query-explanation" class="rounded-lg bg-emerald-50/80 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/70 px-3.5 py-2 text-xs text-emerald-900 dark:text-emerald-200 font-medium"></div>
+
+          <div id="query-answer-box"></div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="surface-card p-5 space-y-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Knowledge Graph Reasoning Paths</h3>
+              <span class="badge-purple">Explicit vs. Inferred</span>
+            </div>
+            <div id="query-paths-list" class="space-y-3"></div>
+          </div>
+
+          <div class="surface-card p-5 space-y-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Source Document Citations &amp; Excerpts</h3>
+              <span class="badge-brand">Chunk Provenance</span>
+            </div>
+            <div id="query-citations-list" class="space-y-3"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- TAB 5: EVALUATION BENCHMARK                                        -->
+    <!-- ================================================================== -->
+    <section id="tab-evaluation" class="tab-panel hidden space-y-6" aria-labelledby="page-title">
+      <div class="surface-card p-5 space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Comparative Evaluation: Conventional Vector RAG vs. Automated Hybrid GraphRAG</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+              Executes 6 benchmark questions (local single-hop, multi-hop cross-document, regulatory chain, contradiction detection, global summary, and unanswerable abstention) against the live backend.
+            </p>
+          </div>
+          <button type="button" id="btn-run-eval" class="btn-primary shrink-0">
+            Run Live Benchmark Suite
+          </button>
+        </div>
+
+        <div id="eval-results-container"></div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- TAB 6: PIPELINE & OBSERVABILITY                                    -->
+    <!-- ================================================================== -->
+    <section id="tab-jobs" class="tab-panel hidden space-y-6" aria-labelledby="page-title">
+      <div class="surface-card p-5 space-y-3">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Ingestion &amp; Indexing Pipeline Jobs</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400">Real job lifecycle states, stages, and timestamps scoped to your tenant.</p>
+          </div>
+        </div>
+        <div id="jobs-table-container"></div>
+      </div>
+
+      <div class="surface-card p-5 space-y-3">
+        <div>
+          <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Operational Query Telemetry &amp; Security Audit Logs</h3>
+          <p class="text-xs text-slate-500 dark:text-slate-400">Records routing strategy, latency, citation count, abstentions, and neutralized prompt-injection attempts without logging secrets.</p>
+        </div>
+        <div id="logs-table-container"></div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- TAB 7: CONFIGURATION & SECURITY                                    -->
+    <!-- ================================================================== -->
+    <section id="tab-config" class="tab-panel hidden space-y-6" aria-labelledby="page-title">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div class="surface-card p-5 space-y-4">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Runtime Model, Embedding &amp; Retrieval Settings</h3>
+              <p class="text-xs text-slate-500 dark:text-slate-400">Protected by backend RBAC: only <code class="font-mono">admin</code> principals can modify runtime settings.</p>
+            </div>
+            <span id="config-role-badge" class="badge-brand">ADMIN REQUIRED</span>
+          </div>
+
+          <form id="config-form" class="space-y-4">
+            <div>
+              <label for="cfg-llm-provider" class="form-label">LLM Provider</label>
+              <select id="cfg-llm-provider" class="form-input">
+                <option value="local">local (Deterministic Grounded Engine)</option>
+                <option value="openai">openai (OpenAI Chat Completions)</option>
+                <option value="ollama">ollama (Local Ollama HTTP)</option>
+              </select>
+            </div>
+
+            <div>
+              <label for="cfg-emb-provider" class="form-label">Embedding Provider</label>
+              <select id="cfg-emb-provider" class="form-input">
+                <option value="local">local (Multi-Scale Semantic Hashing + BM25)</option>
+                <option value="openai">openai (text-embedding-3-small)</option>
+                <option value="ollama">ollama (nomic-embed-text)</option>
+              </select>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label for="cfg-top-k" class="form-label">Default Top-K Chunks</label>
+                <input type="number" id="cfg-top-k" min="1" max="20" value="6" class="form-input" />
+              </div>
+              <div>
+                <label for="cfg-max-hops" class="form-label">Default Max Hops</label>
+                <input type="number" id="cfg-max-hops" min="1" max="4" value="2" class="form-input" />
+              </div>
+              <div>
+                <label for="cfg-chunk-size" class="form-label">Chunk Size (Chars)</label>
+                <input type="number" id="cfg-chunk-size" min="200" max="4000" value="900" class="form-input" />
+              </div>
+            </div>
+
+            <button type="submit" id="btn-save-config" class="btn-primary">
+              Save Runtime Configuration
+            </button>
+          </form>
+        </div>
+
+        <div class="surface-card p-5 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Sanitized Environment &amp; Security State</h3>
+            <span class="badge-success">Secrets Redacted</span>
+          </div>
+          <p class="text-xs text-slate-500 dark:text-slate-400">
+            Live output from <code class="font-mono">GET /api/config</code>. API keys and database credentials are never serialized to the client.
+          </p>
+          <pre id="sanitized-config-json" class="rounded-lg bg-slate-950 text-slate-200 border border-slate-800 p-4 text-xs font-mono overflow-x-auto leading-relaxed">Loading...</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- TAB 8: USER MANAGEMENT, RBAC MATRIX & SECURITY AUDIT LOGS          -->
+    <!-- ================================================================== -->
+    <section id="tab-users" class="tab-panel hidden space-y-6" aria-labelledby="page-title">
+      <!-- Permission Denied Fallback (Shown when non-admin accesses #users) -->
+      <div id="users-permission-denied" class="hidden surface-card p-8 text-center space-y-4">
+        <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-rose-100 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 font-bold text-lg">
+          403
+        </div>
+        <div class="space-y-1 max-w-lg mx-auto">
+          <h3 class="text-base font-bold text-slate-900 dark:text-slate-100">Administrator Privileges Required</h3>
+          <p class="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+            Your current role does not include <code class="font-mono">users:read</code>, <code class="font-mono">users:manage</code>, or <code class="font-mono">audit:read</code> permissions. Server-side RBAC enforces access control on all user administration and security audit endpoints.
+          </p>
+        </div>
+        <div class="flex items-center justify-center gap-3 pt-2">
+          <button type="button" class="btn-outline btn-xs" data-jump-tab="overview">Return to Overview</button>
+          <button type="button" id="btn-users-switch-admin" class="btn-primary btn-xs">Sign In as Administrator</button>
+        </div>
+      </div>
+
+      <!-- Admin Content Wrapper -->
+      <div id="users-admin-content" class="space-y-6">
+        <!-- Documented Role Permission Matrix Card -->
+        <div class="surface-card p-5 space-y-3">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Enforced Server-Side Role &amp; Permission Matrix</h3>
+              <p class="text-xs text-slate-500 dark:text-slate-400">
+                Identity and permissions are resolved strictly from validated server-side session state or database-synced credentials. Document-level ACLs are enforced before chunks, graph nodes, or citations enter the LLM context.
+              </p>
+            </div>
+            <span class="badge-success shrink-0">Zero Browser Role Trust</span>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1">
+            <div class="surface-subcard space-y-2">
+              <div class="flex items-center justify-between">
+                <span class="font-bold text-xs text-slate-900 dark:text-slate-100">Administrator (<code class="font-mono">admin</code>)</span>
+                <span class="badge-brand">Full Control</span>
+              </div>
+              <p class="text-xs text-slate-600 dark:text-slate-300">Manage users, roles, document ACLs, runtime settings, indexing jobs, and security audit logs across the tenant.</p>
+              <div class="flex flex-wrap gap-1 pt-1 text-[10px] font-mono text-slate-500">
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">users:manage</span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">audit:read</span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">config:write</span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">documents:*</span>
+              </div>
+            </div>
+
+            <div class="surface-subcard space-y-2">
+              <div class="flex items-center justify-between">
+                <span class="font-bold text-xs text-slate-900 dark:text-slate-100">Analyst (<code class="font-mono">analyst</code>)</span>
+                <span class="badge-success">Read / Write Corpus</span>
+              </div>
+              <p class="text-xs text-slate-600 dark:text-slate-300">Upload &amp; manage permitted documents, configure document ACLs on owned files, run GraphRAG queries, and execute benchmarks.</p>
+              <div class="flex flex-wrap gap-1 pt-1 text-[10px] font-mono text-slate-500">
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">documents:upload</span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">query:execute</span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">graph:read</span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">evaluation:run</span>
+              </div>
+            </div>
+
+            <div class="surface-subcard space-y-2">
+              <div class="flex items-center justify-between">
+                <span class="font-bold text-xs text-slate-900 dark:text-slate-100">Viewer (<code class="font-mono">viewer</code>)</span>
+                <span class="badge-warning">Read-Only Scoped</span>
+              </div>
+              <p class="text-xs text-slate-600 dark:text-slate-300">Query and inspect only explicitly authorized documents, graph entities, and citations. Cannot upload, delete, or alter settings.</p>
+              <div class="flex flex-wrap gap-1 pt-1 text-[10px] font-mono text-slate-500">
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">documents:read</span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">graph:read</span>
+                <span class="px-1.5 py-0.5 rounded bg-slate-200/70 dark:bg-slate-800">query:execute</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- User Directory & Account Controls Card -->
+        <div class="surface-card p-5 space-y-4">
+          <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Tenant User Directory &amp; Document Access Scope</h3>
+              <p class="text-xs text-slate-500 dark:text-slate-400">Create accounts, assign roles, restrict per-user document visibility, deactivate accounts, or revoke active sessions.</p>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <div>
+                <label for="user-search-input" class="sr-only">Search users by name, username, or email</label>
+                <input type="text" id="user-search-input" placeholder="Search name, username, email..." class="form-input text-xs py-1.5 w-52" />
+              </div>
+              <div>
+                <label for="user-role-filter" class="sr-only">Filter by role</label>
+                <select id="user-role-filter" class="form-input text-xs py-1.5 w-36">
+                  <option value="">All Roles</option>
+                  <option value="admin">Admin</option>
+                  <option value="analyst">Analyst</option>
+                  <option value="viewer">Viewer</option>
+                </select>
+              </div>
+              <div>
+                <label for="user-status-filter" class="sr-only">Filter by account status</label>
+                <select id="user-status-filter" class="form-input text-xs py-1.5 w-36">
+                  <option value="">All Statuses</option>
+                  <option value="true">Active Only</option>
+                  <option value="false">Deactivated Only</option>
+                </select>
+              </div>
+              <button type="button" id="btn-open-create-user" class="btn-primary btn-xs py-2 px-3">
+                + Create User Account
+              </button>
+            </div>
+          </div>
+
+          <div id="users-table-container"></div>
+
+          <div id="users-pagination" class="flex items-center justify-between pt-2 text-xs text-slate-500 dark:text-slate-400"></div>
+        </div>
+
+        <!-- Security & Administrative Audit Logs Card -->
+        <div class="surface-card p-5 space-y-4">
+          <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Immutable Security &amp; RBAC Audit Log</h3>
+              <p class="text-xs text-slate-500 dark:text-slate-400">Tracks login successes/failures, session revocations, role changes, document ACL updates, and denied authorization attempts.</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <div>
+                <label for="audit-search-input" class="sr-only">Search audit logs</label>
+                <input type="text" id="audit-search-input" placeholder="Search actor or action..." class="form-input text-xs py-1.5 w-48" />
+              </div>
+              <div>
+                <label for="audit-status-filter" class="sr-only">Filter by audit outcome</label>
+                <select id="audit-status-filter" class="form-input text-xs py-1.5 w-36">
+                  <option value="">All Outcomes</option>
+                  <option value="success">Success Only</option>
+                  <option value="denied">Denied / Blocked</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div id="audit-logs-container"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ==================================================================== -->
+  <!-- LOGIN OVERLAY / AUTHENTICATION PAGE (#login-view)                    -->
+  <!-- ==================================================================== -->
+  <div id="login-view" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 backdrop-blur-sm p-4 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="login-heading">
+    <div class="surface-card w-full max-w-md p-6 sm:p-7 space-y-5 shadow-2xl border border-slate-200 dark:border-slate-800 my-auto">
+      <div class="flex items-start justify-between gap-3">
+        <div class="flex items-center gap-3">
+          <div class="w-10 h-10 rounded-xl bg-brand-600 text-white font-extrabold flex items-center justify-center text-lg shadow-sm" aria-hidden="true">
+            G
+          </div>
+          <div>
+            <h2 id="login-heading" class="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100">
+              Sign in to Automated GraphRAG
+            </h2>
+            <p class="text-xs text-slate-500 dark:text-slate-400">
+              Enterprise Knowledge Graph &amp; Evidence-Grounded Workspace
+            </p>
+          </div>
+        </div>
+        <button type="button" id="btn-close-login" class="btn-outline btn-xs hidden" aria-label="Close sign in dialog">
+          Close
+        </button>
+      </div>
+
+      <div id="login-error-banner" class="hidden rounded-lg border border-rose-300 dark:border-rose-800 bg-rose-50/90 dark:bg-rose-950/60 px-3.5 py-2.5 text-xs text-rose-800 dark:text-rose-200 font-medium" role="alert"></div>
+
+      <form id="login-form" class="space-y-4" novalidate>
+        <div>
+          <label for="login-identifier" class="form-label">Username or Email Address</label>
+          <input
+            type="text"
+            id="login-identifier"
+            name="identifier"
+            autocomplete="username"
+            required
+            placeholder="admin or admin@graphrag.local"
+            class="form-input"
+          />
+        </div>
+
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label for="login-password" class="form-label mb-0">Password</label>
+          </div>
+          <div class="relative flex items-center">
+            <input
+              type="password"
+              id="login-password"
+              name="password"
+              autocomplete="current-password"
+              required
+              placeholder="Enter your password"
+              class="form-input pr-16"
+            />
+            <button
+              type="button"
+              id="btn-toggle-password"
+              class="absolute right-2 px-2 py-1 text-xs font-semibold rounded text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+              aria-label="Show password"
+              aria-pressed="false"
+            >
+              Show
+            </button>
+          </div>
+        </div>
+
+        <button type="submit" id="btn-login-submit" class="btn-primary w-full py-2.5">
+          Sign In to Workspace
+        </button>
+      </form>
+
+      <!-- Local Dev Quick-Fill Bootstrap Accounts -->
+      <div class="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+        <div class="flex items-center justify-between">
+          <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+            Local Dev Bootstrap Accounts (Quick Fill)
+          </span>
+          <span class="badge-neutral text-[10px]">PBKDF2-SHA256</span>
+        </div>
+        <div class="grid grid-cols-3 gap-2">
+          <button type="button" class="btn-secondary btn-xs justify-center" data-quick-login="admin" data-quick-pass="Admin@GraphRAG2026!">
+            Admin
+          </button>
+          <button type="button" class="btn-secondary btn-xs justify-center" data-quick-login="analyst" data-quick-pass="Analyst@GraphRAG2026!">
+            Analyst
+          </button>
+          <button type="button" class="btn-secondary btn-xs justify-center" data-quick-login="viewer" data-quick-pass="Viewer@GraphRAG2026!">
+            Viewer
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+          Sessions use <code class="font-mono">HttpOnly</code> + <code class="font-mono">SameSite=Lax</code> cookies and <code class="font-mono">X-CSRF-Token</code> verification. Account provisioning &amp; password resets are administrator-managed.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 1: ACCESSIBLE CHUNK INSPECTOR DIALOG                           -->
+  <!-- ==================================================================== -->
+  <div id="chunk-inspector-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4" role="dialog" aria-modal="true" aria-labelledby="chunk-inspector-title">
+    <div class="surface-card w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden shadow-xl">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-800">
+        <h3 id="chunk-inspector-title" class="text-sm font-bold text-slate-900 dark:text-slate-100">
+          Document Preprocessed Chunks
+        </h3>
+        <button type="button" id="btn-close-chunks" class="btn-outline btn-xs" aria-label="Close chunk inspector">
+          Close (Esc)
+        </button>
+      </div>
+      <div id="chunk-inspector-list" class="p-5 overflow-y-auto space-y-3"></div>
+    </div>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 2: ACCESSIBLE DELETE CONFIRMATION DIALOG                       -->
+  <!-- ==================================================================== -->
+  <div id="delete-confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+    <div class="surface-card w-full max-w-md p-5 space-y-4 shadow-xl">
+      <div class="flex items-center gap-2.5 text-rose-600 dark:text-rose-400">
+        <span class="badge-danger">CONFIRM CASCADE DELETION</span>
+      </div>
+      <h3 id="delete-modal-title" class="text-base font-bold text-slate-900 dark:text-slate-100">
+        Delete Document &amp; Derived Graph Artifacts?
+      </h3>
+      <p id="delete-modal-desc" class="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+        This will permanently remove the document, its vector chunks, relationship edges, and any orphaned entities that have no remaining provenance in other documents.
+      </p>
+      <div class="flex items-center justify-end gap-2.5 pt-2">
+        <button type="button" id="btn-cancel-delete" class="btn-outline">Cancel</button>
+        <button type="button" id="btn-confirm-delete" class="btn-danger">Delete Document</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 3: CREATE / EDIT USER & DOCUMENT SCOPE DIALOG                  -->
+  <!-- ==================================================================== -->
+  <div id="user-form-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4 overflow-y-auto" role="dialog" aria-modal="true" aria-labelledby="user-modal-title">
+    <div class="surface-card w-full max-w-lg p-5 sm:p-6 space-y-4 shadow-xl my-auto">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+        <h3 id="user-modal-title" class="text-sm font-bold text-slate-900 dark:text-slate-100">
+          Create User Account
+        </h3>
+        <button type="button" id="btn-close-user-modal" class="btn-outline btn-xs" aria-label="Close user dialog">
+          Close (Esc)
+        </button>
+      </div>
+
+      <div id="user-modal-error" class="hidden rounded-lg border border-rose-300 dark:border-rose-800 bg-rose-50/90 dark:bg-rose-950/60 px-3 py-2 text-xs text-rose-800 dark:text-rose-200"></div>
+
+      <form id="user-form" class="space-y-3.5">
+        <input type="hidden" id="user-form-id" value="" />
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label for="user-form-username" class="form-label">Username</label>
+            <input type="text" id="user-form-username" required minlength="3" maxlength="64" placeholder="e.g., jdoe_analyst" class="form-input text-xs" />
+          </div>
+          <div>
+            <label for="user-form-email" class="form-label">Email Address</label>
+            <input type="email" id="user-form-email" required placeholder="jdoe@graphrag.local" class="form-input text-xs" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label for="user-form-fullname" class="form-label">Full Name</label>
+            <input type="text" id="user-form-fullname" required placeholder="Jane Doe" class="form-input text-xs" />
+          </div>
+          <div>
+            <label for="user-form-role" class="form-label">Assigned RBAC Role</label>
+            <select id="user-form-role" class="form-input text-xs">
+              <option value="viewer">Viewer (Read-Only Authorized Scope)</option>
+              <option value="analyst">Analyst (Upload, Query &amp; Benchmark)</option>
+              <option value="admin">Admin (Full Tenant &amp; User Control)</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <label for="user-form-password" id="user-form-password-label" class="form-label">Initial Password (min 8 chars)</label>
+          <input type="password" id="user-form-password" minlength="8" placeholder="Enter strong password" class="form-input text-xs" />
+        </div>
+
+        <div class="pt-1">
+          <label class="inline-flex items-center gap-2 cursor-pointer text-xs font-medium text-slate-700 dark:text-slate-300">
+            <input type="checkbox" id="user-form-active" checked class="rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
+            <span>Account Active (Uncheck to immediately suspend login &amp; revoke sessions)</span>
+          </label>
+        </div>
+
+        <!-- Per-User Document Access Scope -->
+        <div class="surface-subcard space-y-2">
+          <div class="flex items-center justify-between">
+            <label class="text-xs font-bold text-slate-900 dark:text-slate-100">Document-Level Access Restriction</label>
+            <label class="inline-flex items-center gap-1.5 text-xs cursor-pointer">
+              <input type="checkbox" id="user-form-restrict-docs" class="rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
+              <span>Restrict to Specific Documents</span>
+            </label>
+          </div>
+          <p class="text-[11px] text-slate-500 dark:text-slate-400">
+            When enabled, this user can only view, traverse graph entities/edges, and receive citations from the checked documents below.
+          </p>
+          <div id="user-form-docs-checklist" class="hidden max-h-36 overflow-y-auto space-y-1.5 pt-1 border-t border-slate-200 dark:border-slate-800"></div>
+        </div>
+
+        <div class="flex items-center justify-end gap-2.5 pt-2">
+          <button type="button" id="btn-cancel-user-form" class="btn-outline">Cancel</button>
+          <button type="submit" id="btn-save-user-form" class="btn-primary">Save User Account</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 4: CONFIRM USER STATUS / SESSION REVOCATION DIALOG             -->
+  <!-- ==================================================================== -->
+  <div id="user-confirm-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4" role="dialog" aria-modal="true" aria-labelledby="user-confirm-title">
+    <div class="surface-card w-full max-w-md p-5 space-y-4 shadow-xl">
+      <div class="flex items-center gap-2">
+        <span id="user-confirm-badge" class="badge-warning">CONFIRM SECURITY ACTION</span>
+      </div>
+      <h3 id="user-confirm-title" class="text-base font-bold text-slate-900 dark:text-slate-100">
+        Confirm User Account Action
+      </h3>
+      <p id="user-confirm-desc" class="text-xs text-slate-600 dark:text-slate-300 leading-relaxed"></p>
+      <div class="flex items-center justify-end gap-2.5 pt-2">
+        <button type="button" id="btn-cancel-user-confirm" class="btn-outline">Cancel</button>
+        <button type="button" id="btn-execute-user-confirm" class="btn-danger">Confirm Action</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 5: DOCUMENT ACCESS CONTROL (ACL) DIALOG                        -->
+  <!-- ==================================================================== -->
+  <div id="doc-acl-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4" role="dialog" aria-modal="true" aria-labelledby="doc-acl-title">
+    <div class="surface-card w-full max-w-md p-5 space-y-4 shadow-xl">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+        <h3 id="doc-acl-title" class="text-sm font-bold text-slate-900 dark:text-slate-100">
+          Document Access Control (ACL)
+        </h3>
+        <button type="button" id="btn-close-doc-acl" class="btn-outline btn-xs">Close</button>
+      </div>
+
+      <form id="doc-acl-form" class="space-y-4">
+        <input type="hidden" id="doc-acl-doc-id" value="" />
+        <div>
+          <label for="doc-acl-visibility" class="form-label">Visibility Mode</label>
+          <select id="doc-acl-visibility" class="form-input text-xs">
+            <option value="tenant">tenant — Accessible to selected roles in tenant</option>
+            <option value="restricted">restricted — Restricted to specific roles/users</option>
+            <option value="private">private — Accessible only to document owner &amp; admins</option>
+          </select>
+        </div>
+
+        <div class="space-y-2">
+          <span class="form-label">Permitted Roles (Enforced on Retrieval, Graph &amp; Citations)</span>
+          <div class="flex flex-wrap items-center gap-4 text-xs">
+            <label class="inline-flex items-center gap-1.5">
+              <input type="checkbox" value="admin" checked disabled class="rounded border-slate-300 text-brand-600" />
+              <span>Admin (Always Allowed)</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" id="doc-acl-role-analyst" value="analyst" checked class="rounded border-slate-300 text-brand-600" />
+              <span>Analyst</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" id="doc-acl-role-viewer" value="viewer" checked class="rounded border-slate-300 text-brand-600" />
+              <span>Viewer</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-2.5 pt-2">
+          <button type="button" id="btn-cancel-doc-acl" class="btn-outline">Cancel</button>
+          <button type="submit" class="btn-primary">Update Document Access</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 6: CHANGE PASSWORD DIALOG                                      -->
+  <!-- ==================================================================== -->
+  <div id="change-password-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4" role="dialog" aria-modal="true" aria-labelledby="change-pw-title">
+    <div class="surface-card w-full max-w-md p-5 space-y-4 shadow-xl">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+        <h3 id="change-pw-title" class="text-sm font-bold text-slate-900 dark:text-slate-100">
+          Change Account Password
+        </h3>
+        <button type="button" id="btn-close-pw-modal" class="btn-outline btn-xs">Close</button>
+      </div>
+
+      <div id="change-pw-error" class="hidden rounded-lg border border-rose-300 dark:border-rose-800 bg-rose-50/90 dark:bg-rose-950/60 px-3 py-2 text-xs text-rose-800 dark:text-rose-200"></div>
+
+      <form id="change-password-form" class="space-y-3.5">
+        <div>
+          <label for="cp-current-password" class="form-label">Current Password</label>
+          <input type="password" id="cp-current-password" required minlength="4" class="form-input text-xs" />
+        </div>
+        <div>
+          <label for="cp-new-password" class="form-label">New Password (min 8 characters)</label>
+          <input type="password" id="cp-new-password" required minlength="8" class="form-input text-xs" />
+        </div>
+        <div class="flex items-center justify-end gap-2.5 pt-2">
+          <button type="button" id="btn-cancel-pw-modal" class="btn-outline">Cancel</button>
+          <button type="submit" id="btn-submit-pw" class="btn-primary">Update Password</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
