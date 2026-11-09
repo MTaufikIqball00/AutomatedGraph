@@ -39,7 +39,7 @@ from backend.auth import (
     verify_password,
 )
 from backend.config import ROLE_PERMISSION_MATRIX, Principal, settings
-from backend.database import get_db_connection, init_db
+from backend.database import get_db_connection, get_db_path, init_db
 from backend.demo_fixtures import SYNTHETIC_DEMO_DOCUMENTS
 from backend.evaluation import run_comparative_evaluation
 from backend.generation import synthesize_grounded_answer
@@ -75,8 +75,9 @@ logger = logging.getLogger("automated_graphrag")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Iterator[None]:
     """Initialize SQLite schema and bootstrap default users on startup."""
-    init_db()
-    logger.info("Automated GraphRAG database schema initialized at %s", settings.sqlite_db_path)
+    resolved_path = get_db_path()
+    init_db(str(resolved_path))
+    logger.info("Automated GraphRAG database schema initialized at %s", resolved_path)
     yield
 
 
@@ -1537,7 +1538,9 @@ def update_runtime_config(
     }
 
 
-# Serve Frontend UI static files if present
+# Serve Frontend UI static files if present (supports public/ for Vercel and frontend/ for local development)
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+PUBLIC_DIR = Path(__file__).resolve().parent.parent / "public"
+static_target = PUBLIC_DIR if PUBLIC_DIR.exists() and (PUBLIC_DIR / "index.html").exists() else FRONTEND_DIR
+if static_target.exists():
+    app.mount("/", StaticFiles(directory=str(static_target), html=True), name="frontend")

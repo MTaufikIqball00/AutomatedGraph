@@ -198,6 +198,15 @@ python launch.py
 
 *Peluncur akan secara otomatis menginisialisasi skema database, mendeteksi port TCP yang aman dan bebas konflik (menangani WinError 10013 / 10048), menjalankan server Uvicorn, dan membuka browser pada alamat **`http://127.0.0.1:8765`**.*
 
+### 5. Deploy ke Vercel (Serverless)
+Proyek ini sudah dikonfigurasi sepenuhnya untuk Vercel:
+1. Hubungkan repository GitHub Anda ke [Vercel](https://vercel.com).
+2. Vercel akan otomatis mengenali konfigurasi [`vercel.json`](file:///c:/Users/taufi/Documents/Projects/Automated%20GraphRAG/vercel.json) dan endpoint Serverless Function [`api/index.py`](file:///c:/Users/taufi/Documents/Projects/Automated%20GraphRAG/api/index.py).
+3. Di dashboard Vercel, atur Environment Variables (opsional jika ingin menggunakan OpenAI / model eksternal):
+   - `COOKIE_SECURE=true` (disarankan untuk domain HTTPS produksi)
+   - `OPENAI_API_KEY` (jika menggunakan provider OpenAI)
+4. Klik **Deploy**. Aset statis frontend akan disajikan langsung lewat CDN Vercel di `/`, dan backend FastAPI akan dieksekusi secara instan lewat Serverless Function di `/api/*`. Database SQLite secara otomatis menggunakan `/tmp/graphrag.db` untuk mendukung arsitektur serverless.
+
 ---
 
 ## 🧪 Panduan Pengujian Fitur Langkah demi Langkah
@@ -324,10 +333,12 @@ python -m pytest -v
 
 ```text
 Automated GraphRAG/
+├── api/
+│   └── index.py             # Entrypoint Serverless Function FastAPI untuk deployment Vercel
 ├── backend/
 │   ├── auth.py              # Hashing PBKDF2, manajemen sesi, otorisasi ACL, dan log audit
 │   ├── config.py            # Konfigurasi Pydantic, model Principal, matriks peran & izin
-│   ├── database.py          # Skema SQLite, migrasi, pool koneksi, inisialisasi akun bawaan
+│   ├── database.py          # Skema SQLite, migrasi, pool koneksi, isolasi /tmp serverless
 │   ├── entity_resolution.py # Normalisasi kunci kanonikal, deteksi alias, isolasi konflik versi
 │   ├── extraction.py        # Ekstraksi entitas dan relasi tervalidasi skema
 │   ├── generation.py        # Sintesis jawaban berbasis sitasi, filter prompt, abstinensi jujur
@@ -346,6 +357,9 @@ Automated GraphRAG/
 │   ├── input.css            # Direktif Tailwind CSS dan komponen styling kustom
 │   ├── styles.css           # File stylesheet Tailwind CSS siap produksi
 │   └── ui-components.js     # Manajer modal dialog, notifikasi toast, dan widget antarmuka
+├── public/                  # Aset statis terkompilasi siap disajikan langsung lewat Vercel CDN
+├── scripts/
+│   └── sync-public.js       # Sinkronisasi aset statis frontend ke public saat proses build
 ├── docs/
 │   └── screenshots/         # Gambar showcase tampilan aplikasi untuk repository
 ├── data/                    # Penyimpanan database lokal SQLite (graphrag.db)
@@ -354,11 +368,13 @@ Automated GraphRAG/
 ├── .env.example             # Template konfigurasi variabel lingkungan
 ├── .gitignore               # Aturan pengabaian file Git (Python, Node, database, rahasia)
 ├── launch.py                # Peluncur aplikasi lintas platform dengan resolusi port otomatis
-├── package.json             # Skrip dependensi frontend dan Tailwind CSS
-├── requirements.txt         # Dependensi paket Python produksi
+├── package.json             # Skrip build Vercel, dependensi frontend dan Tailwind CSS
+├── requirements.txt         # Dependensi paket Python produksi (ramping & cepat di serverless)
+├── requirements-dev.txt     # Dependensi pengujian lokal (pytest)
 ├── run.bat                  # Peluncur cepat satu klik untuk Windows Batch
 ├── run.ps1                  # Peluncur cepat satu klik untuk Windows PowerShell
-└── tailwind.config.js       # Konfigurasi token desain dan tema Tailwind CSS
+├── tailwind.config.js       # Konfigurasi token desain dan tema Tailwind CSS
+└── vercel.json              # Konfigurasi routing serverless dan rewrite Vercel
 ```
 
 ---

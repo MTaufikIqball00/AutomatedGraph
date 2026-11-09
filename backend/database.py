@@ -1,7 +1,10 @@
 """Transactional SQLite database management and schema setup for Automated GraphRAG."""
 from __future__ import annotations
 
+import os
+import shutil
 import sqlite3
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -228,9 +231,47 @@ CREATE TABLE IF NOT EXISTS query_logs (
 
 
 def get_db_path(custom_path: str | None = None) -> Path:
-    """Resolve and ensure parent directory exists for SQLite database."""
-    target = Path(custom_path or settings.sqlite_db_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    """Resolve and ensure parent directory exists for SQLite database.
+
+    In serverless environments (such as Vercel or AWS Lambda) where the deployment
+    filesystem is read-only, automatically falls back to the writable /tmp directory.
+    """
+    raw_path = custom_path or settings.sqlite_db_path
+    target = Path(raw_path)
+
+    # Detect Vercel or other serverless execution environments
+    is_serverless = bool(
+        os.environ.get("VERCEL")
+        or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        or os.environ.get("LAMBDA_TASK_ROOT")
+    )
+
+    if is_serverless:
+        tmp_db = Path(tempfile.gettempdir()) / "graphrag.db"
+        try:
+            tmp_db.parent.mkdir(parents=True, exist_ok=True)
+            if target.exists() and not tmp_db.exists():
+                shutil.copy2(target, tmp_db)
+            return tmp_db
+        except Exception:
+            return tmp_db
+
+    # Standard environment: verify write access to target directory
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        test_file = target.parent / ".write_test"
+        try:
+            test_file.touch()
+            test_file.unlink()
+        except OSError:
+            tmp_db = Path(tempfile.gettempdir()) / "graphrag.db"
+            tmp_db.parent.mkdir(parents=True, exist_ok=True)
+            return tmp_db
+    except OSError:
+        tmp_db = Path(tempfile.gettempdir()) / "graphrag.db"
+        tmp_db.parent.mkdir(parents=True, exist_ok=True)
+        return tmp_db
+
     return target
 
 
@@ -251,11 +292,14 @@ def _run_column_migrations(conn: sqlite3.Connection) -> None:
 
 
 def init_db(custom_path: str | None = None) -> None:
-    """Initialize SQLite schema with WAL mode, foreign keys, migrations, and bootstrap users."""
+    """Initialize SQLite schema with foreign keys, migrations, and bootstrap users."""
     db_path = get_db_path(custom_path)
     conn = sqlite3.connect(str(db_path), timeout=30.0)
     try:
-        conn.execute("PRAGMA journal_mode = WAL;")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL;")
+        except sqlite3.OperationalError:
+            conn.execute("PRAGMA journal_mode = DELETE;")
         conn.execute("PRAGMA foreign_keys = ON;")
         conn.executescript(SCHEMA_SQL)
         _run_column_migrations(conn)
