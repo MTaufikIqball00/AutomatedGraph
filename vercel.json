@@ -9,8 +9,12 @@
   },
   "rewrites": [
     {
+      "source": "/api",
+      "destination": "/api/index.py?__url=/api/health"
+    },
+    {
       "source": "/api/(.*)",
-      "destination": "/api/index.py"
+      "destination": "/api/index.py?__url=/api/$1"
     }
   ]
 }

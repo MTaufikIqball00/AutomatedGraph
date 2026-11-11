@@ -6,6 +6,7 @@ import json
 import logging
 import secrets
 import time
+import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
@@ -94,11 +95,39 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def vercel_path_rewrite_middleware(request: Request, call_next):
+    """Restore original API path if request was rewritten to index.py on Vercel."""
+    scope = request.scope
+    current_path = scope.get("path", "")
+    if current_path in ("/api/index.py", "/api/index", "/api", "/api/"):
+        headers = request.headers
+        target_path = (
+            headers.get("x-matched-path")
+            or headers.get("x-invoke-path")
+            or headers.get("x-forwarded-uri")
+            or headers.get("x-original-url")
+        )
+        if (not target_path or target_path in ("/api", "/api/index.py", "/api/index")) and "__url" in request.query_params:
+            target_path = request.query_params.get("__url", "")
+            raw_qs = scope.get("query_string", b"").decode("utf-8")
+            params = urllib.parse.parse_qs(raw_qs)
+            clean_params = {k: v for k, v in params.items() if k != "__url"}
+            scope["query_string"] = urllib.parse.urlencode(clean_params, doseq=True).encode("utf-8")
+
+        if target_path and target_path.startswith("/api/"):
+            clean_path = target_path.split("?")[0]
+            scope["path"] = clean_path
+            scope["raw_path"] = clean_path.encode("utf-8")
+
+    return await call_next(request)
 
 
 def _client_ip(request: Request) -> str:
