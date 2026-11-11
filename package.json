@@ -5,12 +5,12 @@
   "private": true,
   "scripts": {
     "start": "python launch.py",
-    "build": "npm run build:css && node scripts/sync-public.js",
-    "build:css": "tailwindcss -i ./frontend/input.css -o ./frontend/styles.css --minify",
-    "watch:css": "tailwindcss -i ./frontend/input.css -o ./frontend/styles.css --watch",
+    "build": "node scripts/build.js",
+    "build:css": "npx tailwindcss -i ./frontend/input.css -o ./frontend/styles.css --minify",
+    "watch:css": "npx tailwindcss -i ./frontend/input.css -o ./frontend/styles.css --watch",
     "test": "pytest -v"
   },
-  "devDependencies": {
+  "dependencies": {
     "tailwindcss": "^3.4.17"
   }
 }
