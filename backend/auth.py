@@ -4,9 +4,11 @@ Rate Limiting, Audit Logging, and Fine-Grained Document/Graph Authorization.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -73,6 +75,89 @@ def verify_password(password: str, stored_hash: str) -> bool:
 def hash_session_token(raw_token: str) -> str:
     """Hash raw session token before storing or looking up in the database."""
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def get_session_signing_secret() -> bytes:
+    """
+    Derive a deterministic cryptographic key for signing session tokens.
+    Uses SESSION_SECRET env var if set, otherwise deterministically derives
+    from bootstrap admin configuration so all serverless instances (Lambdas)
+    share the exact same signature verification key.
+    """
+    explicit = os.environ.get("SESSION_SECRET") or os.environ.get("SECRET_KEY")
+    if explicit:
+        return explicit.encode("utf-8")
+    seed = f"{settings.initial_admin_password}::{settings.initial_admin_email}::{settings.initial_admin_tenant}::graphrag-session-v1"
+    return hashlib.sha256(seed.encode("utf-8")).digest()
+
+
+def create_signed_session_token(
+    user_row: sqlite3.Row | Dict[str, Any],
+    csrf_token: str,
+    expires_iso: str,
+) -> str:
+    """
+    Generate a self-contained, tamper-evident HMAC-SHA256 signed session token.
+    Format: v1.<base64url_json_payload>.<hmac_sha256_hex>
+    Contains user identity, tenant, role, and permissions so serverless
+    instances with private /tmp filesystems can authenticate the principal
+    without cross-container database synchronization.
+    """
+    secret = get_session_signing_secret()
+    payload: Dict[str, Any] = {
+        "uid": user_row["user_id"],
+        "tid": user_row["tenant_id"],
+        "usr": user_row["username"],
+        "eml": user_row["email"],
+        "fn": user_row["full_name"] if isinstance(user_row, dict) else user_row["full_name"],
+        "rol": user_row["role"],
+        "act": int(user_row["is_active"]) if "is_active" in user_row else 1,
+        "csrf": csrf_token,
+        "exp": expires_iso,
+        "rnd": secrets.token_hex(8),
+    }
+    raw_docs = user_row["allowed_doc_ids_json"] if "allowed_doc_ids_json" in user_row else None
+    if raw_docs:
+        payload["docs"] = raw_docs
+    elif "allowed_doc_ids" in user_row and user_row["allowed_doc_ids"] is not None:
+        payload["docs"] = json.dumps(user_row["allowed_doc_ids"])
+
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    b64_payload = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("utf-8").rstrip("=")
+    sig = hmac.new(secret, b64_payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"v1.{b64_payload}.{sig}"
+
+
+def verify_signed_session_token(raw_token: str) -> Optional[Dict[str, Any]]:
+    """
+    Verify HMAC-SHA256 signature and expiration timestamp of a signed session token.
+    Returns decoded payload dict if valid, or None if invalid or expired.
+    """
+    if not raw_token or not raw_token.startswith("v1."):
+        return None
+
+    parts = raw_token.split(".")
+    if len(parts) != 3 or parts[0] != "v1":
+        return None
+
+    b64_payload, expected_sig = parts[1], parts[2]
+    secret = get_session_signing_secret()
+    computed_sig = hmac.new(secret, b64_payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(computed_sig, expected_sig):
+        return None
+
+    try:
+        padding = "=" * ((4 - len(b64_payload) % 4) % 4)
+        payload_bytes = base64.urlsafe_b64decode(b64_payload + padding)
+        payload = json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        return None
+
+    now_iso = utc_now_iso()
+    if str(payload.get("exp", "")) <= now_iso:
+        return None
+
+    return payload
 
 
 def check_login_rate_limit(ip_addr: str, identifier: str) -> None:
@@ -334,13 +419,13 @@ def authenticate_user_credentials(
 
     clear_login_rate_limit(ip_address, clean_id)
 
-    # Generate fresh opaque session token and CSRF token (prevents session fixation)
-    raw_session_token = secrets.token_urlsafe(32)
-    session_id = hash_session_token(raw_session_token)
+    # Generate fresh signed session token and CSRF token (prevents session fixation and supports serverless multi-container dispatch)
     csrf_token = secrets.token_urlsafe(24)
     now = utc_now()
     now_iso = now.isoformat()
     expires_iso = (now + timedelta(minutes=settings.session_ttl_minutes)).isoformat()
+    raw_session_token = create_signed_session_token(user_row, csrf_token, expires_iso)
+    session_id = hash_session_token(raw_session_token)
 
     with get_db_connection(db_path) as conn:
         conn.execute(
@@ -396,18 +481,125 @@ def resolve_session_principal(
     session_id = hash_session_token(raw_token)
     now_iso = utc_now_iso()
 
-    with get_db_connection(db_path) as conn:
-        row = conn.execute(
-            """
-            SELECT s.session_id, s.csrf_token, s.expires_at, s.revoked_at,
-                   u.user_id, u.tenant_id, u.username, u.email, u.full_name,
-                   u.role, u.is_active, u.allowed_doc_ids_json
-            FROM user_sessions s
-            JOIN users u ON u.user_id = s.user_id
-            WHERE s.session_id = ?
-            """,
-            (session_id,),
-        ).fetchone()
+    try:
+        with get_db_connection(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT s.session_id, s.csrf_token, s.expires_at, s.revoked_at,
+                       u.user_id, u.tenant_id, u.username, u.email, u.full_name,
+                       u.role, u.is_active, u.allowed_doc_ids_json
+                FROM user_sessions s
+                JOIN users u ON u.user_id = s.user_id
+                WHERE s.session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+    except sqlite3.OperationalError:
+        from backend.database import init_db
+        init_db(db_path)
+        with get_db_connection(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT s.session_id, s.csrf_token, s.expires_at, s.revoked_at,
+                       u.user_id, u.tenant_id, u.username, u.email, u.full_name,
+                       u.role, u.is_active, u.allowed_doc_ids_json
+                FROM user_sessions s
+                JOIN users u ON u.user_id = s.user_id
+                WHERE s.session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+
+    # If session not in this container's DB, check if it's a valid signed token
+    if not row:
+        payload = verify_signed_session_token(raw_token)
+        if not payload:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid or expired session. Please sign in again.",
+            )
+
+        with get_db_connection(db_path) as conn:
+            # Check if session was explicitly revoked in this DB
+            revoked_row = conn.execute(
+                "SELECT revoked_at FROM user_sessions WHERE session_id = ? AND revoked_at IS NOT NULL",
+                (session_id,),
+            ).fetchone()
+            if revoked_row:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session has been revoked. Please sign in again.",
+                )
+
+            # Check if user exists in local DB
+            u_row = conn.execute(
+                "SELECT user_id, tenant_id, username, email, full_name, role, is_active, allowed_doc_ids_json FROM users WHERE user_id = ?",
+                (payload["uid"],),
+            ).fetchone()
+
+            if not u_row:
+                seed_default_users(db_path)
+                u_row = conn.execute(
+                    "SELECT user_id, tenant_id, username, email, full_name, role, is_active, allowed_doc_ids_json FROM users WHERE user_id = ?",
+                    (payload["uid"],),
+                ).fetchone()
+
+            if not u_row:
+                # Provision account from verified signed token payload
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO users (
+                        user_id, tenant_id, username, email, full_name,
+                        password_hash, role, is_active, allowed_doc_ids_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        payload["uid"],
+                        payload["tid"],
+                        payload["usr"],
+                        payload["eml"],
+                        payload.get("fn", ""),
+                        hash_password("serverless-sync-" + secrets.token_hex(8)),
+                        payload["rol"],
+                        payload.get("act", 1),
+                        payload.get("docs", '["*"]'),
+                        now_iso,
+                        now_iso,
+                    ),
+                )
+
+            # Record session into local container DB so subsequent queries in this container find it
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO user_sessions (
+                    session_id, user_id, tenant_id, csrf_token,
+                    ip_address, user_agent, created_at, expires_at, revoked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    session_id,
+                    payload["uid"],
+                    payload["tid"],
+                    payload["csrf"],
+                    "serverless-sync",
+                    "sync",
+                    now_iso,
+                    payload["exp"],
+                ),
+            )
+
+            row = conn.execute(
+                """
+                SELECT s.session_id, s.csrf_token, s.expires_at, s.revoked_at,
+                       u.user_id, u.tenant_id, u.username, u.email, u.full_name,
+                       u.role, u.is_active, u.allowed_doc_ids_json
+                FROM user_sessions s
+                JOIN users u ON u.user_id = s.user_id
+                WHERE s.session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
 
     if not row:
         raise HTTPException(

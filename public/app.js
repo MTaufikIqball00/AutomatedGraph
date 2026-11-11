@@ -184,7 +184,8 @@ async function apiFetch(url, options = {}) {
     } catch (_) {}
 
     if (resp.status === 401 && !url.includes("/api/auth/login")) {
-      openLoginModal(state.activeTab, errText);
+      const hasStoredCredentials = Boolean(state.sessionToken || state.apiKey);
+      openLoginModal(state.activeTab, hasStoredCredentials ? errText : "");
     }
     throw new Error(errText);
   }
@@ -1640,6 +1641,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById("login-identifier").value = quickLoginBtn.dataset.quickLogin;
       document.getElementById("login-password").value = quickLoginBtn.dataset.quickPass;
       document.getElementById("login-error-banner")?.classList.add("hidden");
+      document.getElementById("login-form")?.dispatchEvent(new Event("submit", { cancelable: true }));
     }
 
     if (e.target.id === "btn-users-prev" && state.usersPage > 1) {
@@ -2054,6 +2056,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     const initialHash = window.location.hash.replace("#", "");
     switchTab(ROUTE_META[initialHash] ? initialHash : "overview", false);
   } else {
-    openLoginModal("overview", "Please sign in to access the Automated GraphRAG workspace.");
+    const hadToken = Boolean(sessionStorage.getItem("graphrag_session_token"));
+    openLoginModal("overview", hadToken ? "Session expired. Please sign in again." : "");
   }
 });
