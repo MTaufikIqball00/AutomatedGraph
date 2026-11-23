@@ -2092,9 +2092,26 @@ document.addEventListener("DOMContentLoaded", async () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ identifier: idVal, password: pwVal }),
       });
-      const data = await resp.json();
+      const rawBody = await resp.text();
+      let data = null;
+      try {
+        data = rawBody ? JSON.parse(rawBody) : null;
+      } catch (_) {
+        data = null;
+      }
       if (!resp.ok) {
-        throw new Error(data.detail || `Authentication failed (HTTP ${resp.status})`);
+        const detail =
+          (data && (data.detail || data.message)) ||
+          (rawBody && rawBody.trim().slice(0, 180)) ||
+          `Authentication failed (HTTP ${resp.status})`;
+        throw new Error(
+          resp.status >= 500
+            ? `Server error (HTTP ${resp.status}): ${detail}. Check server configuration (e.g. SESSION_SECRET and ALLOWED_ORIGINS in APP_ENV=production).`
+            : detail
+        );
+      }
+      if (!data) {
+        throw new Error("Server returned an empty or non-JSON authentication response.");
       }
 
       state.authMode = "session";
