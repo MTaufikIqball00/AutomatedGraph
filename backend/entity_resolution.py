@@ -40,6 +40,13 @@ def compute_entity_id(tenant_id: str, normalized_key: str, entity_type: EntityTy
     return f"ent-{digest}"
 
 
+def compute_pair_signature(tenant_id: str, entity_type: str, key_a: str, key_b: str) -> str:
+    """Compute an order-independent deterministic signature for an entity pair resolution decision."""
+    lo, hi = sorted([key_a.strip().lower(), key_b.strip().lower()])
+    raw = f"{tenant_id}::{entity_type}::{lo}::{hi}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
 def compute_name_similarity(name_a: str, name_b: str) -> float:
     """Compute hybrid character + token Jaccard similarity between two entity names."""
     norm_a = " ".join(name_a.lower().split())
@@ -90,8 +97,14 @@ class EntityResolver:
       without merging distinct entities.
     """
 
-    def __init__(self, existing_entities: List[Dict[str, object]], tenant_id: str) -> None:
+    def __init__(
+        self,
+        existing_entities: List[Dict[str, object]],
+        tenant_id: str,
+        resolution_decisions: Optional[Dict[str, Dict[str, object]]] = None,
+    ) -> None:
         self.tenant_id = tenant_id
+        self.resolution_decisions: Dict[str, Dict[str, object]] = resolution_decisions or {}
         # Map (entity_type, normalized_key) -> entity_record
         self.by_key: Dict[Tuple[str, str], Dict[str, object]] = {}
         # Map alias_lower -> List[entity_record]
@@ -147,8 +160,15 @@ class EntityResolver:
             same_type = [m for m in matches if m["entity_type"] == ent_type]
             if len(same_type) == 1:
                 target = same_type[0]
+                pair_sig = compute_pair_signature(
+                    self.tenant_id, ent_type, str(target["normalized_key"]), norm_key
+                )
+                prior_decision = self.resolution_decisions.get(pair_sig)
+                if prior_decision and prior_decision.get("decision") == "merged":
+                    self._merge_aliases_and_description(target, extracted)
+                    return target, uncertain_records
                 conflict = has_conflicting_distinguishers(str(target["canonical_name"]), extracted.name)
-                if not conflict:
+                if not conflict and not (prior_decision and prior_decision.get("decision") == "kept_distinct"):
                     self._merge_aliases_and_description(target, extracted)
                     return target, uncertain_records
 
@@ -169,31 +189,41 @@ class EntityResolver:
 
         if best_match is not None and best_score >= 0.72:
             existing_name = str(best_match["canonical_name"])
-            conflict = has_conflicting_distinguishers(existing_name, extracted.name)
-            if conflict is None and best_score >= 0.93:
-                # High-confidence variant without conflicting distinguishers -> safe merge
-                self._merge_aliases_and_description(best_match, extracted)
-                return best_match, uncertain_records
+            pair_sig = compute_pair_signature(
+                self.tenant_id, ent_type, str(best_match["normalized_key"]), norm_key
+            )
+            prior_decision = self.resolution_decisions.get(pair_sig)
+            if prior_decision:
+                if prior_decision.get("decision") == "merged":
+                    self._merge_aliases_and_description(best_match, extracted)
+                    return best_match, uncertain_records
+                # Decision == 'kept_distinct': fall through cleanly without flagging again
             else:
-                # Record as an uncertain match and DO NOT merge distinct entities
-                reason = conflict or f"Moderate surface similarity ({best_score:.2f}) below auto-merge threshold (0.93)"
-                match_hash = hashlib.sha256(
-                    f"{self.tenant_id}::{best_match['entity_id']}::{new_ent_id}".encode("utf-8")
-                ).hexdigest()[:12]
-                uncertain_records.append(
-                    {
-                        "match_id": f"unc-{match_hash}",
-                        "tenant_id": self.tenant_id,
-                        "entity_a_id": str(best_match["entity_id"]),
-                        "entity_a_name": existing_name,
-                        "entity_b_id": new_ent_id,
-                        "entity_b_name": extracted.name,
-                        "entity_type": ent_type,
-                        "similarity_score": best_score,
-                        "reason": reason,
-                        "doc_id": doc_id,
-                    }
-                )
+                conflict = has_conflicting_distinguishers(existing_name, extracted.name)
+                if conflict is None and best_score >= 0.93:
+                    # High-confidence variant without conflicting distinguishers -> safe merge
+                    self._merge_aliases_and_description(best_match, extracted)
+                    return best_match, uncertain_records
+                else:
+                    # Record as an uncertain match and DO NOT merge distinct entities
+                    reason = conflict or f"Moderate surface similarity ({best_score:.2f}) below auto-merge threshold (0.93)"
+                    match_hash = hashlib.sha256(
+                        f"{self.tenant_id}::{best_match['entity_id']}::{new_ent_id}".encode("utf-8")
+                    ).hexdigest()[:12]
+                    uncertain_records.append(
+                        {
+                            "match_id": f"unc-{match_hash}",
+                            "tenant_id": self.tenant_id,
+                            "entity_a_id": str(best_match["entity_id"]),
+                            "entity_a_name": existing_name,
+                            "entity_b_id": new_ent_id,
+                            "entity_b_name": extracted.name,
+                            "entity_type": ent_type,
+                            "similarity_score": best_score,
+                            "reason": reason,
+                            "doc_id": doc_id,
+                        }
+                    )
 
         # 4. Create new canonical entity
         aliases_set: Set[str] = {a.strip() for a in extracted.aliases if a.strip() and a.strip() != extracted.name}

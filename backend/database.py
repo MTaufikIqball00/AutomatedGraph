@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL CHECK (role IN ('admin', 'analyst', 'viewer')),
     is_active INTEGER NOT NULL DEFAULT 1,
     allowed_doc_ids_json TEXT NOT NULL DEFAULT '["*"]',
+    token_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_login_at TEXT
@@ -178,8 +179,40 @@ CREATE TABLE IF NOT EXISTS uncertain_matches (
     similarity_score REAL NOT NULL,
     reason TEXT NOT NULL,
     doc_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    resolved_by TEXT,
+    resolved_at TEXT,
+    resolution_note TEXT,
     created_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, match_id)
+);
+
+CREATE TABLE IF NOT EXISTS entity_resolution_decisions (
+    tenant_id TEXT NOT NULL,
+    pair_signature TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    key_a TEXT NOT NULL,
+    key_b TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('merged', 'kept_distinct')),
+    canonical_key TEXT,
+    decided_by TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, pair_signature)
+);
+
+CREATE TABLE IF NOT EXISTS login_rate_limits (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bucket_key TEXT NOT NULL,
+    attempt_ts REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_login_rate_limits_bucket_ts ON login_rate_limits(bucket_key, attempt_ts);
+
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    setting_key TEXT NOT NULL PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_by TEXT NOT NULL DEFAULT 'system',
+    updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS communities (
@@ -280,14 +313,33 @@ def _run_column_migrations(conn: sqlite3.Connection) -> None:
     doc_cols = {
         row[1] for row in conn.execute("PRAGMA table_info(documents);").fetchall()
     }
-    migrations = [
+    doc_migrations = [
         ("owner_user_id", "ALTER TABLE documents ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT 'user-admin';"),
         ("visibility", "ALTER TABLE documents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'tenant';"),
         ("allowed_roles_json", "ALTER TABLE documents ADD COLUMN allowed_roles_json TEXT NOT NULL DEFAULT '[\"admin\",\"analyst\",\"viewer\"]';"),
         ("allowed_user_ids_json", "ALTER TABLE documents ADD COLUMN allowed_user_ids_json TEXT NOT NULL DEFAULT '[]';"),
     ]
-    for col_name, ddl in migrations:
+    for col_name, ddl in doc_migrations:
         if col_name not in doc_cols:
+            conn.execute(ddl)
+
+    user_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(users);").fetchall()
+    }
+    if "token_version" not in user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 1;")
+
+    unc_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(uncertain_matches);").fetchall()
+    }
+    unc_migrations = [
+        ("status", "ALTER TABLE uncertain_matches ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';"),
+        ("resolved_by", "ALTER TABLE uncertain_matches ADD COLUMN resolved_by TEXT;"),
+        ("resolved_at", "ALTER TABLE uncertain_matches ADD COLUMN resolved_at TEXT;"),
+        ("resolution_note", "ALTER TABLE uncertain_matches ADD COLUMN resolution_note TEXT;"),
+    ]
+    for col_name, ddl in unc_migrations:
+        if col_name not in unc_cols:
             conn.execute(ddl)
 
 

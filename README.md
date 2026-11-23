@@ -198,14 +198,29 @@ python launch.py
 
 *Peluncur akan secara otomatis menginisialisasi skema database, mendeteksi port TCP yang aman dan bebas konflik (menangani WinError 10013 / 10048), menjalankan server Uvicorn, dan membuka browser pada alamat **`http://127.0.0.1:8765`**.*
 
-### 5. Deploy ke Vercel (Serverless)
-Proyek ini sudah dikonfigurasi sepenuhnya untuk Vercel:
-1. Hubungkan repository GitHub Anda ke [Vercel](https://vercel.com).
-2. Vercel akan otomatis mengenali konfigurasi [`vercel.json`](file:///c:/Users/taufi/Documents/Projects/Automated%20GraphRAG/vercel.json) dan endpoint Serverless Function [`api/index.py`](file:///c:/Users/taufi/Documents/Projects/Automated%20GraphRAG/api/index.py).
-3. Di dashboard Vercel, atur Environment Variables (opsional jika ingin menggunakan OpenAI / model eksternal):
-   - `COOKIE_SECURE=true` (disarankan untuk domain HTTPS produksi)
-   - `OPENAI_API_KEY` (jika menggunakan provider OpenAI)
-4. Klik **Deploy**. Aset statis frontend akan disajikan langsung lewat CDN Vercel di `/`, dan backend FastAPI akan dieksekusi secara instan lewat Serverless Function di `/api/*`. Database SQLite secara otomatis menggunakan `/tmp/graphrag.db` untuk mendukung arsitektur serverless.
+### 5. Deployment Produksi (Docker Self-Hosted Baseline) & Mode Preview (Vercel)
+
+#### Opsi Produksi Resmi — Docker Self-Hosted dengan Volume Persisten
+Untuk penggunaan produksi dengan persistensi ACID penuh, antrean ingesti latar belakang (*async background jobs*), `token_version` revokasi sesi lintas-worker, dan tanpa batasan timeout 60 detik serverless:
+```bash
+# 1. Buat SESSION_SECRET acak minimal 32 karakter
+export SESSION_SECRET="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export ALLOWED_ORIGINS="https://graphrag.perusahaan-anda.com"
+
+# 2. Jalankan kontainer dengan persistent volume (/app/data/graphrag.db)
+docker compose up -d --build
+```
+
+#### Mode Preview / Ephemeral Demo — Vercel (Serverless)
+Vercel tetap didukung penuh untuk demonstrasi dan pratinjau cepat:
+1. Hubungkan repository GitHub ke [Vercel](https://vercel.com).
+2. Atur Environment Variables di dashboard Vercel:
+   - `APP_ENV=production`
+   - `SESSION_SECRET=<random-string-minimal-32-karakter>` *(wajib — fail-closed bila kosong)*
+   - `ALLOWED_ORIGINS=https://nama-app-anda.vercel.app`
+   - `TRUST_PROXY_HEADERS=true`
+   - `OPENAI_API_KEY` *(opsional bila memakai OpenAI)*
+3. *Catatan Arsitektur*: Pada lingkungan Vercel tanpa basis data eksternal, SQLite menggunakan `/tmp/graphrag.db` yang bersifat *ephemeral* (sementara) dan memiliki batas waktu eksekusi `maxDuration: 60` detik. Gunakan **Docker Self-Hosted** (atau Postgres + `pgvector` pada tahap scale-out) untuk data produksi permanen.
 
 ---
 
@@ -220,26 +235,26 @@ Proyek ini sudah dikonfigurasi sepenuhnya untuk Vercel:
 
 ### 2. Ingesti Dokumen & Sampel Korpus Enterprise
 1. Buka tab **Documents & Ingestion**.
-2. Klik tombol **Load Enterprise Sample Corpus**.
-   - Sistem akan memuat 3 dokumen enterprise: Cloud Architecture, Incident Report `INC-2025-089`, dan Dokumen Regulasi DORA.
+2. Klik tombol **Load Synthetic Demo Corpus (3 Docs)**.
+   - Sistem akan memuat 3 dokumen enterprise: Cloud Architecture, Incident Report `INC-2026-041`, dan Dokumen Regulasi DORA.
 3. Klik tombol **Inspect Chunks** pada salah satu dokumen untuk melihat pemotongan teks sadar-struktur, penanda halaman, dan jumlah token.
-4. Klik tombol **Manage Access** untuk menguji konfigurasi visibilitas dokumen (`Tenant-Wide`, `Restricted`, atau `Private`).
+4. Klik tombol **Manage Access** untuk menguji konfigurasi visibilitas dokumen (`Tenant-Wide`, `Restricted`, atau `Private`) beserta preservasi user allowlist.
 
 ### 3. Penjelajah Knowledge Graph
 1. Masuk ke tab **Graph Explorer**.
 2. Cari nama entitas (misal: `Helios` atau `Aurelia`) atau gunakan filter **Entity Type** (`SYSTEM`, `EVENT`, `POLICY`).
-3. Klik salah satu node pada graf (atau baris pada tabel entitas di bawahnya) untuk melihat alias, skor kepercayaan, relasi yang terhubung, dan kutipan bukti aslinya.
+3. Klik salah satu node pada graf (atau baris pada tabel entitas) untuk melihat alias, skor kepercayaan, relasi yang terhubung, dan kutipan bukti aslinya.
 4. Pada panel **Multi-Hop Path Finder**, atur:
-   - **Source Entity**: `Incident INC-2025-089`
-   - **Target Entity**: `Aurelia Financial Cloud`
-   - Klik **Find Shortest Path** untuk melihat jalur keterhubungan multi-langkah.
-5. Periksa tabel **Uncertain Matches Review** untuk melihat pemisahan konflik versi entitas.
+   - **Source Entity**: `Incident INC-2026-041`
+   - **Target Entity**: `Aurelia Financial Cloud` (atau `Meridian Retail Bank`)
+   - Klik **Find Shortest Path** untuk menyorot jalur terpendek beserta badge nomor hop dan bukti kutipan per langkah.
+5. Pada tabel **Tracked Uncertain Entity Resolution Matches**, Admin/Analyst dapat memilih **Approve Merge** atau **Keep Distinct** (tersimpan permanen walau dokumen di-reindex).
 
-### 4. Grounded QA Copilot
+### 4. Grounded QA Copilot (Indonesia + Inggris)
 1. Buka tab **Query & Grounded QA**.
 2. Pilih mode **Hybrid GraphRAG**.
-3. Ajukan pertanyaan inferensi sebab-akibat lintas dokumen:
-   > *"Apa yang menyebabkan insiden INC-2025-089 pada Helios Payment Gateway dan apa dampak terhadap regulasi serta penalti SLA?"*
+3. Ajukan pertanyaan inferensi sebab-akibat lintas dokumen dalam Bahasa Indonesia maupun Inggris:
+   > *"Apa yang menyebabkan insiden INC-2026-041 pada Helios Payment Gateway dan apa dampak terhadap regulasi serta penalti SLA?"*
 4. Periksa struktur jawaban yang dihasilkan:
    - Sitasi teks inline `[1]`, `[2]` yang merujuk langsung ke chunk dokumen.
    - Tag penelusuran graf `[G1]` yang menandai relasi entitas yang digunakan.
@@ -274,34 +289,46 @@ Seluruh endpoint terproteksi memerlukan cookie sesi aktif yang valid atau header
 
 | Metode | Endpoint | Deskripsi | Peran / Izin Akses Minimal |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/api/auth/login` | Autentikasi pengguna & pembuatan cookie sesi | Publik |
+| `GET` | `/api/auth/client-config` | Konfigurasi non-sensitif UI login (`quick_fill_enabled`) | Publik |
+| `POST` | `/api/auth/login` | Autentikasi pengguna, signed session token, & cookie `HttpOnly` | Publik |
 | `POST` | `/api/auth/logout` | Pencabutan sesi aktif & penghapusan cookie | Terautentikasi |
 | `GET` | `/api/auth/whoami` | Mengambil data identitas pengguna aktif & peran | Terautentikasi |
-| `POST` | `/api/auth/change-password` | Memperbarui password pengguna yang sedang login | Terautentikasi |
-| `GET` | `/api/overview` | Statistik ringkasan dasbor & distribusi data | `overview:read` |
+| `POST` | `/api/auth/change-password` | Memperbarui password & merotasi `token_version` sesi | Terautentikasi |
+| `GET` | `/api/overview` | Statistik ringkasan dasbor & distribusi data | Terautentikasi |
 | `GET` | `/api/documents` | Daftar dokumen yang berhak diakses pengguna | `documents:read` |
-| `POST` | `/api/documents/upload` | Ingesti file dokumen baru (`.md`, `.pdf`, dll.) | `documents:upload` |
-| `POST` | `/api/documents/seed-demo` | Memuat korpus sampel dokumen enterprise | `documents:upload` |
-| `PUT` | `/api/documents/{doc_id}/acl` | Memperbarui hak visibilitas dan ACL dokumen | `documents:acl` |
-| `DELETE`| `/api/documents/{doc_id}` | Menghapus dokumen, chunk, dan node graf yatim secara kaskade | `documents:delete` |
-| `GET` | `/api/graph/subgraph` | Mengambil subgraf entitas untuk dokumen yang diizinkan | `graph:read` |
-| `GET` | `/api/graph/communities` | Mengambil ringkasan tematik komunitas Louvain | `graph:read` |
-| `POST` | `/api/query` | Menjalankan query RAG dengan verifikasi sitasi | `query:execute` |
+| `POST` | `/api/documents/upload` | Ingesti file baru (`?async_mode=true` mengembalikan `202` + `job_id`) | `admin` / `analyst` |
+| `POST` | `/api/documents/load-demo-fixtures` | Memuat 3 korpus sampel dokumen enterprise | `admin` / `analyst` |
+| `PUT` | `/api/documents/{doc_id}/acl` | Memperbarui visibilitas (`tenant`/`restricted`/`private`) & ACL | `admin` / owner |
+| `DELETE`| `/api/documents/{doc_id}` | Menghapus dokumen, chunk, dan node graf yatim secara kaskade | `admin` / `analyst` |
+| `GET` | `/api/graph/subgraph` | Mengambil subgraf entitas terfilter ACL dokumen | `graph:read` |
+| `GET` | `/api/graph/entities` | Daftar entitas terotorisasi untuk kontrol Path Finder | `graph:read` |
+| `GET` | `/api/graph/shortest-path` | Menelusuri jalur terpendek multi-hop antar entitas | `graph:read` |
+| `GET` | `/api/graph/uncertain-matches` | Daftar pasangan entitas ambigu (`pending` / `resolved` / `all`) | `graph:read` |
+| `POST` | `/api/graph/uncertain-matches/{match_id}/resolve` | Menyetujui penggabungan (*merge*) atau pemisahan entitas | `graph:resolve_entities` |
+| `GET` | `/api/graph/communities` | Mengambil ringkasan tematik komunitas | `graph:read` |
+| `POST` | `/api/query` | Menjalankan query RAG hibrida dengan verifikasi sitasi | `query:execute` |
+| `GET` | `/api/jobs/{job_id}` | Memantau progres real-time pekerjaan ingesti dokumen | `jobs:read` |
 | `GET` | `/api/users` | Daftar seluruh pengguna (filter & pencarian) | `users:read` (Admin) |
 | `POST` | `/api/users` | Menambahkan akun pengguna baru beserta cakupan akses | `users:manage` (Admin) |
-| `PATCH`| `/api/users/{user_id}` | Mengubah peran, status, atau reset password | `users:manage` (Admin) |
+| `PATCH`| `/api/users/{user_id}` | Mengubah peran, status, atau reset password (`token_version++`) | `users:manage` (Admin) |
 | `GET` | `/api/audit-logs` | Mengambil catatan log audit keamanan sistem | `audit:read` (Admin) |
-| `POST` | `/api/evaluate` | Menjalankan benchmark: GraphRAG vs Vector Baseline | `evaluation:run` |
+| `POST` | `/api/evaluation/run` | Menjalankan benchmark: Hybrid GraphRAG vs Vector-Only | `admin` / `analyst` |
 
 ---
 
-## 🧪 Pengujian Otomatis & Verifikasi
+## 🧪 Pengujian Otomatis & Verifikasi CI/CD
 
-Proyek ini telah dilengkapi dengan rangkaian pengujian integrasi dan keamanan menyeluruh pada file `tests/test_graphrag_system.py`:
+Proyek ini menggunakan `pyproject.toml`, `ruff`, `eslint`, dan rangkaian pengujian menyeluruh pada [`tests/test_graphrag_system.py`](file:///c:/Users/taufi/Documents/Projects/Automated%20GraphRAG/tests/test_graphrag_system.py) dan [`tests/test_engineering_hardening.py`](file:///c:/Users/taufi/Documents/Projects/Automated%20GraphRAG/tests/test_engineering_hardening.py):
 
 ```bash
-# Menjalankan seluruh pengujian otomatis
-python -m pytest -v
+# Menjalankan seluruh pengujian otomatis Python secara langsung
+pytest -v
+
+# Linter Python & JavaScript serta verifikasi sinkronisasi frontend -> public
+ruff check backend api tests
+npm run lint:js
+npm run build
+npm run check:sync
 ```
 
 ### Hasil Verifikasi Pengujian (11/11 Lulus):

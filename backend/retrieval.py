@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set
 
 from backend.database import get_db_connection
 from backend.graph_store import KnowledgeGraphStore
@@ -10,12 +10,12 @@ from backend.schemas import CitationItem, CommunityView, GraphPathCitation
 from backend.vector_store import search_chunks_hybrid_vector_bm25
 
 GLOBAL_QUERY_CUES = re.compile(
-    r"\b(overall|summary|summarize|themes?|trends?|across\s+all\s+documents|communities|clusters|high-level|landscape|main\s+risks|executive\s+overview|global)\b",
+    r"\b(overall|summary|summarize|themes?|trends?|across\s+all\s+documents|communities|clusters|high-level|landscape|main\s+risks|executive\s+overview|global|ringkas|ringkasan|rangkum|tema\s+utama|tren|seluruh\s+dokumen|risiko\s+utama|keseluruhan)\b",
     re.IGNORECASE,
 )
 
 MULTI_HOP_CUES = re.compile(
-    r"\b(how\s+did|chain\s+of|indirectly|downstream|upstream|root\s+cause|cascade|cascading|connect|relationship\s+between|path\s+from|impact\s+on|which\s+regulatory|who\s+operates)\b",
+    r"\b(how\s+did|chain\s+of|indirectly|downstream|upstream|root\s+cause|cascade|cascading|connect|relationship\s+between|path\s+from|impact\s+on|which\s+regulatory|who\s+operates|bagaimana|akar\s+masalah|dampak\s+berantai|hubungan\s+antara|keterkaitan|jalur\s+dari|berdampak\s+pada|siapa\s+yang\s+mengoperasikan|regulasi\s+mana)\b",
     re.IGNORECASE,
 )
 

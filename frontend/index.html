@@ -257,6 +257,16 @@
             </button>
           </div>
         </form>
+
+        <div id="upload-job-progress" class="hidden mt-4 rounded-lg border border-brand-200 dark:border-brand-800/70 bg-brand-50/70 dark:bg-brand-950/30 p-3 space-y-2" role="status" aria-live="polite">
+          <div class="flex items-center justify-between text-xs">
+            <span id="upload-job-label" class="font-semibold text-brand-900 dark:text-brand-200">Indexing job running...</span>
+            <span id="upload-job-pct" class="font-mono font-bold text-brand-700 dark:text-brand-300">0%</span>
+          </div>
+          <div class="w-full h-2 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+            <div id="upload-job-bar" class="h-full bg-brand-600 transition-all duration-300" style="width: 0%"></div>
+          </div>
+        </div>
       </div>
 
       <div class="surface-card p-5 space-y-4">
@@ -359,6 +369,49 @@
         </div>
       </div>
 
+      <!-- Multi-Hop Shortest Path Finder Panel -->
+      <div class="surface-card p-4 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Multi-Hop Path Finder</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400">
+              Trace the shortest provenance-backed connection chain between any two authorized entities across documents.
+            </p>
+          </div>
+          <span class="badge-success text-[10px]">Shortest Path Traversal</span>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-3 items-end">
+          <div class="lg:col-span-4">
+            <label for="path-source-select" class="form-label">Source Entity</label>
+            <select id="path-source-select" class="form-input text-xs">
+              <option value="">Select source entity...</option>
+            </select>
+          </div>
+          <div class="lg:col-span-4">
+            <label for="path-target-select" class="form-label">Target Entity</label>
+            <select id="path-target-select" class="form-input text-xs">
+              <option value="">Select target entity...</option>
+            </select>
+          </div>
+          <div class="lg:col-span-2">
+            <label for="path-max-hops" class="form-label">Max Hops</label>
+            <select id="path-max-hops" class="form-input text-xs">
+              <option value="2">Up to 2 Hops</option>
+              <option value="3">Up to 3 Hops</option>
+              <option value="4" selected>Up to 4 Hops</option>
+              <option value="5">Up to 5 Hops</option>
+              <option value="6">Up to 6 Hops</option>
+            </select>
+          </div>
+          <div class="lg:col-span-2 flex items-center gap-1.5">
+            <button type="button" id="btn-find-path" class="btn-primary flex-1 text-xs py-2">Find Shortest Path</button>
+            <button type="button" id="btn-swap-path" class="btn-outline px-2.5 py-2 text-xs" title="Swap source and target entities" aria-label="Swap source and target entities">⇄</button>
+            <button type="button" id="btn-clear-path" class="btn-outline px-2.5 py-2 text-xs" title="Clear highlighted path">Clear</button>
+          </div>
+        </div>
+        <div id="path-result-box" class="hidden rounded-lg border border-emerald-200 dark:border-emerald-800/70 bg-emerald-50/70 dark:bg-emerald-950/30 p-3 text-xs space-y-2"></div>
+      </div>
+
       <!-- Graph Canvas + Provenance Inspector Split Layout -->
       <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div class="lg:col-span-7 surface-card p-4 flex flex-col">
@@ -400,11 +453,21 @@
 
       <!-- Uncertain Entity Resolution Matches -->
       <div class="surface-card p-5 space-y-3">
-        <div>
-          <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Tracked Uncertain Entity Resolution Matches (Held Back from Auto-Merge)</h3>
-          <p class="text-xs text-slate-500 dark:text-slate-400">
-            Entities with similar surface names but distinct version numbers (<code class="font-mono">v2.4</code> vs <code class="font-mono">v1.9</code>) or regional qualifiers (<code class="font-mono">US</code> vs <code class="font-mono">UK</code>) are preserved separately to prevent graph corruption.
-          </p>
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h3 class="text-sm font-bold text-slate-900 dark:text-slate-100">Tracked Uncertain Entity Resolution Matches (Held Back from Auto-Merge)</h3>
+            <p class="text-xs text-slate-500 dark:text-slate-400">
+              Entities with similar surface names but distinct version numbers (<code class="font-mono">v2.4</code> vs <code class="font-mono">v1.9</code>) or regional qualifiers (<code class="font-mono">US</code> vs <code class="font-mono">UK</code>) are preserved separately unless reviewed and merged by an Admin or Analyst.
+            </p>
+          </div>
+          <div class="shrink-0">
+            <label for="uncertain-status-filter" class="sr-only">Filter uncertain matches by status</label>
+            <select id="uncertain-status-filter" class="form-input text-xs py-1.5 w-44">
+              <option value="pending" selected>Pending Review</option>
+              <option value="resolved">Resolved History</option>
+              <option value="all">All Matches</option>
+            </select>
+          </div>
         </div>
         <div id="uncertain-matches-container"></div>
       </div>
@@ -846,25 +909,15 @@
         </button>
       </form>
 
-      <!-- Local Dev Quick-Fill Bootstrap Accounts -->
-      <div class="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+      <!-- Local Dev Quick-Fill Bootstrap Accounts (Hidden in Production via /api/auth/client-config) -->
+      <div id="quick-login-section" class="hidden pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
         <div class="flex items-center justify-between">
           <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">
             Local Dev Bootstrap Accounts (Quick Fill)
           </span>
           <span class="badge-neutral text-[10px]">PBKDF2-SHA256</span>
         </div>
-        <div class="grid grid-cols-3 gap-2">
-          <button type="button" class="btn-secondary btn-xs justify-center" data-quick-login="admin" data-quick-pass="Admin@GraphRAG2026!">
-            Admin
-          </button>
-          <button type="button" class="btn-secondary btn-xs justify-center" data-quick-login="analyst" data-quick-pass="Analyst@GraphRAG2026!">
-            Analyst
-          </button>
-          <button type="button" class="btn-secondary btn-xs justify-center" data-quick-login="viewer" data-quick-pass="Viewer@GraphRAG2026!">
-            Viewer
-          </button>
-        </div>
+        <div id="quick-login-buttons" class="grid grid-cols-3 gap-2"></div>
         <p class="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
           Sessions use <code class="font-mono">HttpOnly</code> + <code class="font-mono">SameSite=Lax</code> cookies and <code class="font-mono">X-CSRF-Token</code> verification. Account provisioning &amp; password resets are administrator-managed.
         </p>
@@ -1032,7 +1085,7 @@
           </select>
         </div>
 
-        <div class="space-y-2">
+        <div id="doc-acl-roles-section" class="space-y-2">
           <span class="form-label">Permitted Roles (Enforced on Retrieval, Graph &amp; Citations)</span>
           <div class="flex flex-wrap items-center gap-4 text-xs">
             <label class="inline-flex items-center gap-1.5">
@@ -1048,6 +1101,20 @@
               <span>Viewer</span>
             </label>
           </div>
+          <p id="doc-acl-private-hint" class="hidden text-[11px] text-amber-700 dark:text-amber-300 bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/70 rounded-lg px-2.5 py-2">
+            Private mode restricts document access strictly to its owner, tenant admins, and explicitly listed user IDs below (role checkboxes are inactive).
+          </p>
+        </div>
+
+        <div id="doc-acl-users-section" class="space-y-1.5 pt-2 border-t border-slate-200 dark:border-slate-800">
+          <div class="flex items-center justify-between gap-2">
+            <label for="doc-acl-users-input" class="form-label mb-0">Allowed User IDs (Allowlist)</label>
+            <span id="doc-acl-users-count" class="badge-neutral text-[10px]">0 user(s)</span>
+          </div>
+          <input type="text" id="doc-acl-users-input" placeholder="Comma-separated user IDs (e.g., user-viewer) — leave untouched to preserve" class="form-input text-xs font-mono" />
+          <p id="doc-acl-users-hint" class="text-[11px] text-slate-500 dark:text-slate-400">
+            Preserved automatically when unchanged. Tenant admins may add or clear tenant-scoped user IDs.
+          </p>
         </div>
 
         <div class="flex items-center justify-end gap-2.5 pt-2">
@@ -1086,6 +1153,46 @@
           <button type="submit" id="btn-submit-pw" class="btn-primary">Update Password</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 7: RESOLVE / MERGE UNCERTAIN ENTITY MATCH DIALOG               -->
+  <!-- ==================================================================== -->
+  <div id="uncertain-merge-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-4" role="dialog" aria-modal="true" aria-labelledby="merge-modal-title">
+    <div class="surface-card w-full max-w-md p-5 space-y-4 shadow-xl">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+        <h3 id="merge-modal-title" class="text-sm font-bold text-slate-900 dark:text-slate-100">
+          Approve Entity Merge &amp; Select Canonical Name
+        </h3>
+        <button type="button" id="btn-close-merge-modal" class="btn-outline btn-xs">Close</button>
+      </div>
+
+      <p class="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+        Choose the surviving canonical entity. All mentions, relationships, and aliases from the other candidate will be merged atomically and communities recomputed.
+      </p>
+
+      <input type="hidden" id="merge-match-id" value="" />
+      <div class="space-y-2 text-xs">
+        <label class="flex items-center gap-2.5 p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900">
+          <input type="radio" name="merge-canonical-choice" id="merge-keep-a" value="" checked class="text-brand-600 focus:ring-brand-500" />
+          <span class="font-semibold text-slate-900 dark:text-slate-100" id="merge-keep-a-name">Candidate A</span>
+        </label>
+        <label class="flex items-center gap-2.5 p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-900">
+          <input type="radio" name="merge-canonical-choice" id="merge-keep-b" value="" class="text-brand-600 focus:ring-brand-500" />
+          <span class="font-semibold text-slate-900 dark:text-slate-100" id="merge-keep-b-name">Candidate B</span>
+        </label>
+      </div>
+
+      <div>
+        <label for="merge-note-input" class="form-label">Audit Resolution Note (Optional)</label>
+        <input type="text" id="merge-note-input" maxlength="250" placeholder="e.g., Confirmed alias variant across quarterly reports" class="form-input text-xs" />
+      </div>
+
+      <div class="flex items-center justify-end gap-2.5 pt-2">
+        <button type="button" id="btn-cancel-merge" class="btn-outline">Cancel</button>
+        <button type="button" id="btn-confirm-merge" class="btn-primary">Confirm Merge</button>
+      </div>
     </div>
   </div>
 

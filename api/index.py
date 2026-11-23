@@ -18,6 +18,6 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 # Import the pre-configured FastAPI application instance
-from backend.main import app
+from backend.main import app  # noqa: E402
 
 __all__ = ["app"]

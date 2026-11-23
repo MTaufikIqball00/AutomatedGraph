@@ -81,7 +81,11 @@ const state = {
   usersTotalPages: 1,
   pendingUserAction: null,
   graphData: { nodes: [], edges: [] },
+  graphEntitiesCache: [],
+  uncertainMatchesCache: [],
   pendingDeleteDoc: null,
+  pendingMergeMatch: null,
+  editingDocAclOriginalUsersRaw: "",
   theme: localStorage.getItem("graphrag_theme") || "dark",
 };
 
@@ -262,7 +266,7 @@ async function refreshIdentity() {
     }
 
     return true;
-  } catch (err) {
+  } catch (_err) {
     state.principal = null;
     if (badge) {
       badge.innerHTML = `
@@ -557,6 +561,17 @@ function renderFilteredDocuments() {
   `;
 }
 
+function syncDocAclVisibilityUI() {
+  const visEl = document.getElementById("doc-acl-visibility");
+  const isPrivate = visEl?.value === "private";
+  const analystCb = document.getElementById("doc-acl-role-analyst");
+  const viewerCb = document.getElementById("doc-acl-role-viewer");
+  const hint = document.getElementById("doc-acl-private-hint");
+  if (analystCb) analystCb.disabled = isPrivate;
+  if (viewerCb) viewerCb.disabled = isPrivate;
+  if (hint) hint.classList.toggle("hidden", !isPrivate);
+}
+
 function openDocAclModal(docId) {
   const doc = state.documentsCache.find((d) => d.doc_id === docId);
   if (!doc) return;
@@ -566,6 +581,29 @@ function openDocAclModal(docId) {
   const roles = doc.allowed_roles || ["admin", "analyst", "viewer"];
   document.getElementById("doc-acl-role-analyst").checked = roles.includes("analyst");
   document.getElementById("doc-acl-role-viewer").checked = roles.includes("viewer");
+
+  const allowedUsers = Array.isArray(doc.allowed_user_ids) ? doc.allowed_user_ids : [];
+  const rawUsers = allowedUsers.join(", ");
+  state.editingDocAclOriginalUsersRaw = rawUsers;
+
+  const usersCountEl = document.getElementById("doc-acl-users-count");
+  if (usersCountEl) {
+    usersCountEl.textContent = `${allowedUsers.length} user(s)`;
+  }
+  const usersInput = document.getElementById("doc-acl-users-input");
+  const usersHint = document.getElementById("doc-acl-users-hint");
+  const isAdmin = state.principal?.role === "admin";
+  if (usersInput) {
+    usersInput.value = rawUsers;
+    usersInput.disabled = !isAdmin;
+  }
+  if (usersHint) {
+    usersHint.textContent = isAdmin
+      ? "Preserved automatically when unchanged. Enter comma-separated tenant user IDs (e.g., user-viewer) or clear to remove."
+      : "Existing allowed user IDs are preserved automatically (only Admins can edit user allowlists).";
+  }
+
+  syncDocAclVisibilityUI();
   document.getElementById("doc-acl-modal").classList.remove("hidden");
 }
 
@@ -641,6 +679,7 @@ async function loadGraphExplorer() {
   const entType = document.getElementById("graph-entity-type").value;
   const relType = document.getElementById("graph-rel-type").value;
   const incInferred = document.getElementById("graph-include-inferred").checked;
+  const uncStatus = document.getElementById("uncertain-status-filter")?.value || "pending";
 
   const params = new URLSearchParams();
   if (search) params.set("search", search);
@@ -650,12 +689,17 @@ async function loadGraphExplorer() {
   params.set("limit_nodes", "65");
 
   try {
-    const [subgraph, uncertain] = await Promise.all([
+    const [subgraph, uncertain, entitiesList] = await Promise.all([
       apiFetch(`/api/graph/subgraph?${params.toString()}`),
-      apiFetch("/api/graph/uncertain-matches"),
+      apiFetch(`/api/graph/uncertain-matches?status=${encodeURIComponent(uncStatus)}`),
+      apiFetch("/api/graph/entities?limit=250"),
     ]);
 
     state.graphData = subgraph;
+    state.uncertainMatchesCache = uncertain;
+    state.graphEntitiesCache = entitiesList;
+
+    populatePathFinderSelects(entitiesList);
     document.getElementById("graph-stats-badge").textContent =
       `Showing ${subgraph.returned_nodes} of ${subgraph.total_graph_nodes} nodes • ${subgraph.returned_edges} of ${subgraph.total_graph_edges} edges`;
 
@@ -663,41 +707,312 @@ async function loadGraphExplorer() {
       graphRenderer.render(subgraph.nodes, subgraph.edges);
     }
 
-    const uncContainer = document.getElementById("uncertain-matches-container");
-    uncContainer.innerHTML = uncertain.length
-      ? `<div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>Entity Candidate A</th>
-                <th>Entity Candidate B</th>
-                <th>Schema Type</th>
-                <th>Surface Similarity</th>
-                <th>Holdback Rationale (Why Not Merged)</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${uncertain
-                .map(
-                  (u) => `
-                <tr>
-                  <td class="font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(u.entity_a_name)}</td>
-                  <td class="font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(u.entity_b_name)}</td>
-                  <td>${renderEntityTypeBadge(u.entity_type)}</td>
-                  <td class="font-mono font-semibold">${(u.similarity_score * 100).toFixed(1)}%</td>
-                  <td class="text-xs text-slate-600 dark:text-slate-300">${escapeHtml(u.reason)}</td>
-                </tr>`
-                )
-                .join("")}
-            </tbody>
-          </table>
-        </div>`
-      : renderEmptyState({
-          title: "No Uncertain Entity Matches Flagged",
-          description: "Ambiguous entity pairs held back from automatic merging will appear here.",
-        });
+    renderUncertainMatchesTable(uncertain);
   } catch (err) {
     showBanner(`Graph query blocked or failed: ${err.message}`, "error");
+  }
+}
+
+function populatePathFinderSelects(entitiesList = []) {
+  const srcSelect = document.getElementById("path-source-select");
+  const tgtSelect = document.getElementById("path-target-select");
+  if (!srcSelect || !tgtSelect) return;
+
+  const prevSrc = srcSelect.value;
+  const prevTgt = tgtSelect.value;
+  const optsHtml = entitiesList
+    .map(
+      (ent) =>
+        `<option value="${escapeHtml(ent.entity_id)}">${escapeHtml(ent.canonical_name)} (${escapeHtml(
+          ent.entity_type
+        )})</option>`
+    )
+    .join("");
+
+  srcSelect.innerHTML = `<option value="">Select source entity...</option>${optsHtml}`;
+  tgtSelect.innerHTML = `<option value="">Select target entity...</option>${optsHtml}`;
+
+  if (prevSrc && entitiesList.some((e) => e.entity_id === prevSrc)) {
+    srcSelect.value = prevSrc;
+  } else if (entitiesList.length > 0) {
+    const inc = entitiesList.find((e) => e.canonical_name.includes("INC-"));
+    if (inc) srcSelect.value = inc.entity_id;
+  }
+
+  if (prevTgt && entitiesList.some((e) => e.entity_id === prevTgt)) {
+    tgtSelect.value = prevTgt;
+  } else if (entitiesList.length > 1) {
+    const org = entitiesList.find((e) => e.entity_type === "ORGANIZATION" && e.entity_id !== srcSelect.value);
+    if (org) tgtSelect.value = org.entity_id;
+  }
+}
+
+async function runShortestPathFinder() {
+  const srcId = document.getElementById("path-source-select")?.value;
+  const tgtId = document.getElementById("path-target-select")?.value;
+  const maxHops = document.getElementById("path-max-hops")?.value || "4";
+  const incInferred = document.getElementById("graph-include-inferred")?.checked ?? true;
+  const resultBox = document.getElementById("path-result-box");
+  if (!srcId || !tgtId) {
+    showBanner("Please select both a Source Entity and a Target Entity.", "info");
+    return;
+  }
+
+  const btn = document.getElementById("btn-find-path");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Tracing...";
+  }
+
+  try {
+    const q = new URLSearchParams({
+      source_id: srcId,
+      target_id: tgtId,
+      max_hops: String(maxHops),
+      include_inferred: String(incInferred),
+    });
+    const res = await apiFetch(`/api/graph/shortest-path?${q.toString()}`);
+
+    // Union-merge returned path_nodes and path_edges into state.graphData so truncated subgraphs always show the full path
+    const nodeMap = new Map((state.graphData.nodes || []).map((n) => [n.entity_id, n]));
+    (res.path_nodes || []).forEach((pn) => {
+      if (!nodeMap.has(pn.entity_id)) nodeMap.set(pn.entity_id, pn);
+    });
+    const edgeMap = new Map((state.graphData.edges || []).map((e) => [e.edge_id, e]));
+    (res.path_edges || []).forEach((pe) => {
+      if (!edgeMap.has(pe.edge_id)) edgeMap.set(pe.edge_id, pe);
+    });
+    state.graphData.nodes = Array.from(nodeMap.values());
+    state.graphData.edges = Array.from(edgeMap.values());
+
+    if (graphRenderer) {
+      graphRenderer.render(state.graphData.nodes, state.graphData.edges);
+      if (res.found && res.paths && res.paths.length > 0) {
+        const primary = res.paths[0];
+        graphRenderer.setHighlightedPath(primary.node_ids || [], primary.edge_ids || []);
+      } else if (srcId === tgtId) {
+        graphRenderer.setHighlightedPath([srcId], []);
+      } else {
+        graphRenderer.clearHighlightedPath();
+      }
+    }
+
+    if (resultBox) {
+      resultBox.classList.remove("hidden");
+      if (res.found && res.paths && res.paths.length > 0) {
+        resultBox.innerHTML = `
+          <div class="flex flex-wrap items-center justify-between gap-2 font-semibold text-emerald-900 dark:text-emerald-200">
+            <span>${escapeHtml(res.message)}</span>
+            <span class="badge-success font-mono">${res.hop_count} hop(s)</span>
+          </div>
+          ${res.paths
+            .map(
+              (p) => `
+            <div class="p-2.5 rounded bg-white dark:bg-slate-900 border border-emerald-200/80 dark:border-emerald-800/70 font-mono text-xs text-slate-900 dark:text-slate-100 overflow-x-auto">
+              ${escapeHtml(p.path_text)}
+            </div>`
+            )
+            .join("")}
+        `;
+        renderPathProvenanceInspector(res.paths[0]);
+      } else {
+        resultBox.innerHTML = `<span class="text-amber-800 dark:text-amber-200 font-medium">${escapeHtml(
+          res.message || "No connected path found."
+        )}</span>`;
+      }
+    }
+  } catch (err) {
+    showBanner(`Path finder failed: ${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Find Shortest Path";
+    }
+  }
+}
+
+function clearShortestPathFinder() {
+  graphRenderer?.clearHighlightedPath();
+  const box = document.getElementById("path-result-box");
+  if (box) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+  }
+}
+
+function renderPathProvenanceInspector(pathObj) {
+  const box = document.getElementById("graph-inspector-content");
+  if (!box || !pathObj) return;
+  const edges = pathObj.edges || [];
+  box.innerHTML = `
+    <div class="surface-subcard space-y-2 text-xs">
+      <div class="flex items-center justify-between">
+        <span class="badge-success font-mono">MULTI-HOP PATH • ${edges.length} HOP(S)</span>
+        <span class="badge-neutral font-mono">Min Conf: ${(pathObj.min_confidence * 100).toFixed(0)}%</span>
+      </div>
+      <div class="p-2 rounded bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 font-mono text-xs text-slate-900 dark:text-slate-100">
+        ${escapeHtml(pathObj.path_text)}
+      </div>
+    </div>
+    <div class="space-y-2">
+      <h4 class="text-xs font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+        Step-by-Step Edge Provenance (${edges.length})
+      </h4>
+      ${edges
+        .map(
+          (e, idx) => `
+        <div class="surface-subcard space-y-1.5 text-xs">
+          <div class="flex items-center justify-between gap-2">
+            <span class="font-bold text-emerald-700 dark:text-emerald-400">Hop #${idx + 1}</span>
+            <span class="${e.is_inferred ? "badge-purple" : "badge-success"} font-mono">${escapeHtml(
+              e.relationship_type
+            )}</span>
+          </div>
+          <div class="font-semibold text-slate-900 dark:text-slate-100">
+            ${escapeHtml(e.source)} → ${escapeHtml(e.target)}
+          </div>
+          <p class="italic text-slate-600 dark:text-slate-300">"${escapeHtml(e.evidence_quote)}"</p>
+          <div class="text-[11px] font-mono text-slate-500">
+            ${escapeHtml(e.filename || e.doc_id)} • ${escapeHtml(e.chunk_id)}
+          </div>
+        </div>`
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderUncertainMatchesTable(uncertain = []) {
+  const uncContainer = document.getElementById("uncertain-matches-container");
+  if (!uncContainer) return;
+  const canResolve = state.principal?.role === "admin" || state.principal?.role === "analyst";
+
+  uncContainer.innerHTML = uncertain.length
+    ? `<div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Entity Candidate A</th>
+              <th>Entity Candidate B</th>
+              <th>Schema Type</th>
+              <th>Surface Similarity</th>
+              <th>Holdback Rationale (Why Not Merged)</th>
+              <th class="text-right">Resolution Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${uncertain
+              .map((u) => {
+                const isPending = (u.status || "pending") === "pending";
+                const statusCell = isPending
+                  ? `<div class="inline-flex items-center gap-1.5">
+                       <button type="button" class="btn-secondary btn-xs" data-uncertain-action="open-merge" data-match-id="${escapeHtml(
+                         u.match_id
+                       )}" ${
+                      !canResolve ? "disabled title='Admin or Analyst role required to merge entities'" : ""
+                    }>Approve Merge</button>
+                       <button type="button" class="btn-outline btn-xs" data-uncertain-action="keep-distinct" data-match-id="${escapeHtml(
+                         u.match_id
+                       )}" ${
+                      !canResolve ? "disabled title='Admin or Analyst role required'" : ""
+                    }>Keep Distinct</button>
+                     </div>`
+                  : `<div class="text-right space-y-0.5">
+                       <span class="${
+                         u.status === "merged" ? "badge-success" : "badge-neutral"
+                       } font-mono uppercase">${escapeHtml(u.status)}</span>
+                       <div class="text-[10px] font-mono text-slate-500">by ${escapeHtml(
+                         u.resolved_by || "system"
+                       )}</div>
+                     </div>`;
+                return `
+              <tr>
+                <td class="font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(u.entity_a_name)}</td>
+                <td class="font-semibold text-slate-900 dark:text-slate-100">${escapeHtml(u.entity_b_name)}</td>
+                <td>${renderEntityTypeBadge(u.entity_type)}</td>
+                <td class="font-mono font-semibold">${(u.similarity_score * 100).toFixed(1)}%</td>
+                <td class="text-xs text-slate-600 dark:text-slate-300">
+                  <div>${escapeHtml(u.reason)}</div>
+                  ${
+                    u.resolution_note
+                      ? `<div class="text-[11px] text-slate-500 mt-0.5">Note: ${escapeHtml(u.resolution_note)}</div>`
+                      : ""
+                  }
+                </td>
+                <td class="text-right whitespace-nowrap">${statusCell}</td>
+              </tr>`;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      </div>`
+    : renderEmptyState({
+        title: "No Uncertain Entity Matches in This View",
+        description: "Ambiguous entity pairs held back from automatic merging will appear here.",
+      });
+}
+
+function openUncertainMergeModal(matchId) {
+  const m = state.uncertainMatchesCache.find((x) => x.match_id === matchId);
+  if (!m) return;
+  state.pendingMergeMatch = m;
+  document.getElementById("merge-match-id").value = m.match_id;
+  const radioA = document.getElementById("merge-keep-a");
+  const radioB = document.getElementById("merge-keep-b");
+  radioA.value = m.entity_a_id;
+  radioB.value = m.entity_b_id;
+  radioA.checked = true;
+  document.getElementById("merge-keep-a-name").textContent = `${m.entity_a_name} (${m.entity_a_id})`;
+  document.getElementById("merge-keep-b-name").textContent = `${m.entity_b_name} (${m.entity_b_id})`;
+  document.getElementById("merge-note-input").value = "";
+  document.getElementById("uncertain-merge-modal").classList.remove("hidden");
+}
+
+async function confirmUncertainMerge() {
+  const matchId = document.getElementById("merge-match-id").value;
+  const selectedRadio = document.querySelector('input[name="merge-canonical-choice"]:checked');
+  const canonicalEntityId = selectedRadio ? selectedRadio.value : null;
+  const note = document.getElementById("merge-note-input").value.trim();
+  const btn = document.getElementById("btn-confirm-merge");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Merging...";
+  }
+  try {
+    const res = await apiFetch(`/api/graph/uncertain-matches/${encodeURIComponent(matchId)}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "merge",
+        canonical_entity_id: canonicalEntityId,
+        note,
+      }),
+    });
+    document.getElementById("uncertain-merge-modal").classList.add("hidden");
+    showBanner(`Merged entities into '${res.canonical_name}' and recomputed communities.`, "success");
+    await loadGraphExplorer();
+  } catch (err) {
+    showBanner(`Entity merge failed: ${err.message}`, "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Confirm Merge";
+    }
+  }
+}
+
+async function executeKeepDistinctMatch(matchId) {
+  try {
+    await apiFetch(`/api/graph/uncertain-matches/${encodeURIComponent(matchId)}/resolve`, {
+      method: "POST",
+      body: JSON.stringify({
+        action: "keep_distinct",
+        note: "Reviewed and confirmed distinct in Graph Explorer",
+      }),
+    });
+    showBanner("Marked entity pair as permanently distinct (preserved across re-indexing).", "success");
+    await loadGraphExplorer();
+  } catch (err) {
+    showBanner(`Action failed: ${err.message}`, "error");
   }
 }
 
@@ -1579,8 +1894,43 @@ async function triggerDemoCorpusLoad() {
   }
 }
 
+async function initClientAuthConfig() {
+  const section = document.getElementById("quick-login-section");
+  const container = document.getElementById("quick-login-buttons");
+  if (!section || !container) return;
+  try {
+    const resp = await fetch("/api/auth/client-config", { credentials: "same-origin" });
+    if (!resp.ok) {
+      section.classList.add("hidden");
+      return;
+    }
+    const cfg = await resp.json();
+    if (cfg && cfg.quick_fill_enabled === true) {
+      const devAccounts = [
+        { label: "Admin", user: "admin", pass: "Admin@GraphRAG2026!" },
+        { label: "Analyst", user: "analyst", pass: "Analyst@GraphRAG2026!" },
+        { label: "Viewer", user: "viewer", pass: "Viewer@GraphRAG2026!" },
+      ];
+      container.innerHTML = devAccounts
+        .map(
+          (a) =>
+            `<button type="button" class="btn-secondary btn-xs justify-center" data-quick-login="${escapeHtml(a.user)}" data-quick-pass="${escapeHtml(a.pass)}">${escapeHtml(a.label)}</button>`
+        )
+        .join("");
+      section.classList.remove("hidden");
+    } else {
+      container.innerHTML = "";
+      section.classList.add("hidden");
+    }
+  } catch (_) {
+    container.innerHTML = "";
+    section.classList.add("hidden");
+  }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
   applyTheme(state.theme);
+  await initClientAuthConfig();
 
   const svgEl = document.getElementById("graph-svg");
   if (svgEl) {
@@ -1636,6 +1986,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (uAction === "revoke-sessions") openUserConfirmModal("revoke-sessions", userId);
     }
 
+    const uncActionBtn = e.target.closest("[data-uncertain-action]");
+    if (uncActionBtn) {
+      const mAction = uncActionBtn.dataset.uncertainAction;
+      const matchId = uncActionBtn.dataset.matchId;
+      if (mAction === "open-merge") openUncertainMergeModal(matchId);
+      if (mAction === "keep-distinct") executeKeepDistinctMatch(matchId);
+    }
+
     const quickLoginBtn = e.target.closest("[data-quick-login]");
     if (quickLoginBtn) {
       document.getElementById("login-identifier").value = quickLoginBtn.dataset.quickLogin;
@@ -1685,7 +2043,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
 
-    if (retryBtn) {
+    const retryBtn = e.target.closest("[data-retry-action]");
+    if (retryBtn && retryBtn.dataset.retryAction) {
       switchTab(retryBtn.dataset.retryAction, false);
     }
   });
@@ -1797,15 +2156,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     const errEl = document.getElementById("change-pw-error");
     errEl.classList.add("hidden");
     try {
-      await apiFetch("/api/auth/change-password", {
+      const res = await apiFetch("/api/auth/change-password", {
         method: "POST",
         body: JSON.stringify({
           current_password: document.getElementById("cp-current-password").value,
           new_password: document.getElementById("cp-new-password").value,
         }),
       });
+      if (res.session_token) {
+        state.sessionToken = res.session_token;
+        sessionStorage.setItem("graphrag_session_token", state.sessionToken);
+      }
+      if (res.csrf_token) {
+        state.csrfToken = res.csrf_token;
+        sessionStorage.setItem("graphrag_csrf_token", state.csrfToken);
+      }
       document.getElementById("change-password-modal").classList.add("hidden");
-      showBanner("Password updated successfully.", "success");
+      showBanner("Password updated successfully. Previous sessions have been revoked.", "success");
     } catch (err) {
       errEl.textContent = err.message;
       errEl.classList.remove("hidden");
@@ -1845,19 +2212,63 @@ document.addEventListener("DOMContentLoaded", async () => {
     } else {
       formData.append("allowed_roles", "admin,analyst,viewer");
     }
+    const progressBox = document.getElementById("upload-job-progress");
+    const progressLabel = document.getElementById("upload-job-label");
+    const progressPct = document.getElementById("upload-job-pct");
+    const progressBar = document.getElementById("upload-job-bar");
+
     try {
-      const res = await apiFetch("/api/documents/upload", { method: "POST", body: formData });
-      showBanner(
-        `Indexed '${res.filename}': ${res.chunk_count} chunks, ${res.entity_count} entities, ${res.relationship_count} edges.`,
-        "success"
-      );
-      fileInput.value = "";
-      loadDocuments();
+      const res = await apiFetch("/api/documents/upload?async_mode=true", { method: "POST", body: formData });
+      if (res.status === "queued" && res.job_id) {
+        if (progressBox) progressBox.classList.remove("hidden");
+        if (progressLabel) progressLabel.textContent = `Queued '${res.filename}' (${res.job_id})...`;
+        if (progressPct) progressPct.textContent = "5%";
+        if (progressBar) progressBar.style.width = "5%";
+
+        let terminalJob = null;
+        for (let attempt = 0; attempt < 120; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          const job = await apiFetch(`/api/jobs/${encodeURIComponent(res.job_id)}`);
+          const pct = Math.min(100, Math.max(0, Number(job.progress_pct) || 0));
+          if (progressLabel) progressLabel.textContent = `Indexing '${res.filename}': ${job.stage}`;
+          if (progressPct) progressPct.textContent = `${pct}%`;
+          if (progressBar) progressBar.style.width = `${pct}%`;
+
+          if (job.status === "completed" || job.status === "failed") {
+            terminalJob = job;
+            break;
+          }
+        }
+        if (terminalJob && terminalJob.status === "completed") {
+          const det = terminalJob.details || {};
+          showBanner(
+            `Indexed '${res.filename}': ${det.chunk_count ?? 0} chunks, ${det.entity_count ?? 0} entities, ${det.relationship_count ?? 0} edges.`,
+            "success"
+          );
+          fileInput.value = "";
+          loadDocuments();
+        } else if (terminalJob && terminalJob.status === "failed") {
+          showBanner(`Indexing failed: ${terminalJob.error_message || "Unknown error"}`, "error");
+        } else {
+          showBanner(`Indexing job ${res.job_id} is still running in the background. Check Pipeline Jobs.`, "info");
+          loadDocuments();
+        }
+      } else {
+        showBanner(
+          `Indexed '${res.filename}': ${res.chunk_count} chunks, ${res.entity_count} entities, ${res.relationship_count} edges.`,
+          "success"
+        );
+        fileInput.value = "";
+        loadDocuments();
+      }
     } catch (err) {
       showBanner(`Upload failed: ${err.message}`, "error");
     } finally {
       btn.disabled = state.principal.role === "viewer";
       btn.textContent = "Upload & Index Document";
+      if (progressBox) {
+        setTimeout(() => progressBox.classList.add("hidden"), 2500);
+      }
     }
   });
 
@@ -1868,6 +2279,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.getElementById("btn-cancel-doc-acl")?.addEventListener("click", () => {
     document.getElementById("doc-acl-modal").classList.add("hidden");
   });
+  document.getElementById("doc-acl-visibility")?.addEventListener("change", syncDocAclVisibilityUI);
   document.getElementById("doc-acl-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const docId = document.getElementById("doc-acl-doc-id").value;
@@ -1876,14 +2288,24 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (document.getElementById("doc-acl-role-analyst").checked) allowedRoles.push("analyst");
     if (document.getElementById("doc-acl-role-viewer").checked) allowedRoles.push("viewer");
 
+    const payload = {
+      visibility,
+      allowed_roles: allowedRoles,
+    };
+    const usersInput = document.getElementById("doc-acl-users-input");
+    if (usersInput && !usersInput.disabled) {
+      const currentRaw = usersInput.value.trim();
+      if (currentRaw !== state.editingDocAclOriginalUsersRaw.trim()) {
+        payload.allowed_user_ids = currentRaw
+          ? currentRaw.split(",").map((s) => s.trim()).filter(Boolean)
+          : [];
+      }
+    }
+
     try {
       await apiFetch(`/api/documents/${encodeURIComponent(docId)}/acl`, {
         method: "PUT",
-        body: JSON.stringify({
-          visibility,
-          allowed_roles: allowedRoles,
-          allowed_user_ids: [],
-        }),
+        body: JSON.stringify(payload),
       });
       document.getElementById("doc-acl-modal").classList.add("hidden");
       showBanner("Document access control updated.", "success");
@@ -1996,11 +2418,33 @@ document.addEventListener("DOMContentLoaded", async () => {
       document.getElementById("user-confirm-modal")?.classList.add("hidden");
       document.getElementById("doc-acl-modal")?.classList.add("hidden");
       document.getElementById("change-password-modal")?.classList.add("hidden");
+      document.getElementById("uncertain-merge-modal")?.classList.add("hidden");
       closeLoginModal();
     }
   });
 
-  // Graph Explorer controls
+  // Merge uncertain entity modal buttons
+  document.getElementById("btn-close-merge-modal")?.addEventListener("click", () => {
+    document.getElementById("uncertain-merge-modal")?.classList.add("hidden");
+  });
+  document.getElementById("btn-cancel-merge")?.addEventListener("click", () => {
+    document.getElementById("uncertain-merge-modal")?.classList.add("hidden");
+  });
+  document.getElementById("btn-confirm-merge")?.addEventListener("click", confirmUncertainMerge);
+  document.getElementById("uncertain-status-filter")?.addEventListener("change", loadGraphExplorer);
+
+  // Graph Explorer controls & Multi-Hop Path Finder
+  document.getElementById("btn-find-path")?.addEventListener("click", runShortestPathFinder);
+  document.getElementById("btn-clear-path")?.addEventListener("click", clearShortestPathFinder);
+  document.getElementById("btn-swap-path")?.addEventListener("click", () => {
+    const srcEl = document.getElementById("path-source-select");
+    const tgtEl = document.getElementById("path-target-select");
+    if (srcEl && tgtEl) {
+      const tmp = srcEl.value;
+      srcEl.value = tgtEl.value;
+      tgtEl.value = tmp;
+    }
+  });
   document.getElementById("btn-filter-graph")?.addEventListener("click", loadGraphExplorer);
   document.getElementById("btn-reset-graph-filter")?.addEventListener("click", () => {
     document.getElementById("graph-search").value = "";

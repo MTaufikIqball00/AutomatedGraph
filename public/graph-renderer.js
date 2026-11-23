@@ -17,6 +17,9 @@ export class InteractiveGraphRenderer {
     this.edges = [];
     this.selectedNodeId = null;
     this.selectedEdgeId = null;
+    this.highlightedPathNodeIds = new Set();
+    this.highlightedPathEdgeIds = new Set();
+    this.pathNodeOrder = new Map();
     this.showEdgeLabels = false;
 
     // Viewport transform state
@@ -82,6 +85,22 @@ export class InteractiveGraphRenderer {
     this.render(this.nodes, this.edges);
   }
 
+  setHighlightedPath(nodeIds = [], edgeIds = []) {
+    this.highlightedPathNodeIds = new Set(nodeIds);
+    this.highlightedPathEdgeIds = new Set(edgeIds);
+    this.pathNodeOrder = new Map(nodeIds.map((id, idx) => [id, idx + 1]));
+    this.selectedNodeId = null;
+    this.selectedEdgeId = null;
+    this.render(this.nodes, this.edges);
+  }
+
+  clearHighlightedPath() {
+    this.highlightedPathNodeIds = new Set();
+    this.highlightedPathEdgeIds = new Set();
+    this.pathNodeOrder = new Map();
+    this.render(this.nodes, this.edges);
+  }
+
   _applyTransform() {
     if (this.viewportGroup) {
       this.viewportGroup.setAttribute(
@@ -123,6 +142,9 @@ export class InteractiveGraphRenderer {
       </marker>
       <marker id="arrow-active" viewBox="0 0 10 10" refX="21" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
         <path d="M 0 1.5 L 10 5 L 0 8.5 z" fill="#3b82f6"></path>
+      </marker>
+      <marker id="arrow-path" viewBox="0 0 10 10" refX="21" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path d="M 0 1.5 L 10 5 L 0 8.5 z" fill="#10b981"></path>
       </marker>
     `;
     this.svg.appendChild(defs);
@@ -171,6 +193,8 @@ export class InteractiveGraphRenderer {
       });
     }
 
+    const isPathActive = this.highlightedPathNodeIds.size > 0;
+
     // 3. Render Edges
     edges.forEach((edge) => {
       const src = posMap[edge.source_id];
@@ -178,10 +202,12 @@ export class InteractiveGraphRenderer {
       if (!src || !tgt) return;
 
       const isEdgeSelected = this.selectedEdgeId === edge.edge_id;
+      const isEdgeInPath = this.highlightedPathEdgeIds.has(edge.edge_id);
       const isConnectedToSelectedNode =
         this.selectedNodeId &&
         (edge.source_id === this.selectedNodeId || edge.target_id === this.selectedNodeId);
       const isDimmed =
+        (isPathActive && !isEdgeInPath && !isEdgeSelected && !isConnectedToSelectedNode) ||
         (this.selectedNodeId && !isConnectedToSelectedNode) ||
         (this.selectedEdgeId && !isEdgeSelected);
 
@@ -200,24 +226,33 @@ export class InteractiveGraphRenderer {
       line.setAttribute("x2", String(tgt.x));
       line.setAttribute("y2", String(tgt.y));
 
-      const strokeColor =
-        isEdgeSelected || isConnectedToSelectedNode
-          ? "#3b82f6"
-          : edge.is_inferred
-          ? "#a855f7"
-          : "#64748b";
+      const strokeColor = isEdgeInPath
+        ? "#10b981"
+        : isEdgeSelected || isConnectedToSelectedNode
+        ? "#3b82f6"
+        : edge.is_inferred
+        ? "#a855f7"
+        : "#64748b";
       line.setAttribute("stroke", strokeColor);
       line.setAttribute(
         "stroke-width",
-        isEdgeSelected || isConnectedToSelectedNode ? "2.8" : edge.is_inferred ? "1.6" : "2.0"
+        isEdgeInPath
+          ? "3.4"
+          : isEdgeSelected || isConnectedToSelectedNode
+          ? "2.8"
+          : edge.is_inferred
+          ? "1.6"
+          : "2.0"
       );
-      line.setAttribute("stroke-opacity", isDimmed ? "0.22" : "0.85");
+      line.setAttribute("stroke-opacity", isDimmed ? "0.18" : "0.9");
       if (edge.is_inferred) {
         line.setAttribute("stroke-dasharray", "5,4");
       }
       line.setAttribute(
         "marker-end",
-        isEdgeSelected || isConnectedToSelectedNode
+        isEdgeInPath
+          ? "url(#arrow-path)"
+          : isEdgeSelected || isConnectedToSelectedNode
           ? "url(#arrow-active)"
           : edge.is_inferred
           ? "url(#arrow-inferred)"
@@ -226,15 +261,19 @@ export class InteractiveGraphRenderer {
 
       edgeGroup.appendChild(line);
 
-      if (this.showEdgeLabels || isEdgeSelected || isConnectedToSelectedNode) {
+      if (this.showEdgeLabels || isEdgeSelected || isConnectedToSelectedNode || isEdgeInPath) {
         const midX = Math.round((src.x + tgt.x) / 2);
         const midY = Math.round((src.y + tgt.y) / 2);
         const edgeText = document.createElementNS(SVG_NS, "text");
         edgeText.setAttribute("x", String(midX));
         edgeText.setAttribute("y", String(midY - 4));
         edgeText.setAttribute("text-anchor", "middle");
-        edgeText.setAttribute("font-size", "8.5");
-        edgeText.setAttribute("fill", isEdgeSelected || isConnectedToSelectedNode ? "#60a5fa" : "#94a3b8");
+        edgeText.setAttribute("font-size", isEdgeInPath ? "9.5" : "8.5");
+        edgeText.setAttribute("font-weight", isEdgeInPath ? "700" : "400");
+        edgeText.setAttribute(
+          "fill",
+          isEdgeInPath ? "#34d399" : isEdgeSelected || isConnectedToSelectedNode ? "#60a5fa" : "#94a3b8"
+        );
         edgeText.textContent = edge.relationship_type;
         edgeGroup.appendChild(edgeText);
       }
@@ -262,8 +301,10 @@ export class InteractiveGraphRenderer {
     nodes.forEach((node) => {
       const p = posMap[node.entity_id];
       const isSelected = this.selectedNodeId === node.entity_id;
+      const isNodeInPath = this.highlightedPathNodeIds.has(node.entity_id);
       const isDimmed =
-        this.selectedNodeId && !neighborIds.has(node.entity_id);
+        (isPathActive && !isNodeInPath && !this.selectedNodeId) ||
+        (this.selectedNodeId && !neighborIds.has(node.entity_id));
 
       const g = document.createElementNS(SVG_NS, "g");
       g.setAttribute("class", "cursor-pointer focus:outline-none");
@@ -273,10 +314,21 @@ export class InteractiveGraphRenderer {
         "aria-label",
         `${node.entity_type} entity ${node.canonical_name}, degree ${node.degree}`
       );
-      g.setAttribute("opacity", isDimmed ? "0.3" : "1");
+      g.setAttribute("opacity", isDimmed ? "0.22" : "1");
 
       const radius = Math.min(18, Math.max(9, 8 + node.degree * 1.3));
       const fillHex = (ENTITY_PALETTE[node.entity_type] || ENTITY_PALETTE.CONCEPT).hex;
+
+      if (isNodeInPath) {
+        const pathHalo = document.createElementNS(SVG_NS, "circle");
+        pathHalo.setAttribute("cx", String(p.x));
+        pathHalo.setAttribute("cy", String(p.y));
+        pathHalo.setAttribute("r", String(radius + 6));
+        pathHalo.setAttribute("fill", "none");
+        pathHalo.setAttribute("stroke", "#10b981");
+        pathHalo.setAttribute("stroke-width", "3");
+        g.appendChild(pathHalo);
+      }
 
       if (isSelected) {
         const halo = document.createElementNS(SVG_NS, "circle");
@@ -294,15 +346,15 @@ export class InteractiveGraphRenderer {
       circle.setAttribute("cy", String(p.y));
       circle.setAttribute("r", String(radius));
       circle.setAttribute("fill", fillHex);
-      circle.setAttribute("stroke", isSelected ? "#ffffff" : "#0f172a");
-      circle.setAttribute("stroke-width", isSelected ? "2.5" : "2");
+      circle.setAttribute("stroke", isSelected || isNodeInPath ? "#ffffff" : "#0f172a");
+      circle.setAttribute("stroke-width", isSelected || isNodeInPath ? "2.5" : "2");
 
       const label = document.createElementNS(SVG_NS, "text");
       label.setAttribute("x", String(p.x));
       label.setAttribute("y", String(p.y + radius + 12));
-      label.setAttribute("fill", isSelected ? "#60a5fa" : "#e2e8f0");
-      label.setAttribute("font-size", isSelected ? "11" : "10");
-      label.setAttribute("font-weight", isSelected ? "700" : "500");
+      label.setAttribute("fill", isNodeInPath ? "#34d399" : isSelected ? "#60a5fa" : "#e2e8f0");
+      label.setAttribute("font-size", isSelected || isNodeInPath ? "11" : "10");
+      label.setAttribute("font-weight", isSelected || isNodeInPath ? "700" : "500");
       label.setAttribute("text-anchor", "middle");
       label.textContent =
         node.canonical_name.length > 24
@@ -311,6 +363,27 @@ export class InteractiveGraphRenderer {
 
       g.appendChild(circle);
       g.appendChild(label);
+
+      const hopOrder = this.pathNodeOrder.get(node.entity_id);
+      if (hopOrder !== undefined) {
+        const hopCircle = document.createElementNS(SVG_NS, "circle");
+        hopCircle.setAttribute("cx", String(p.x + radius + 2));
+        hopCircle.setAttribute("cy", String(p.y - radius + 1));
+        hopCircle.setAttribute("r", "7");
+        hopCircle.setAttribute("fill", "#059669");
+        hopCircle.setAttribute("stroke", "#ffffff");
+        hopCircle.setAttribute("stroke-width", "1.2");
+        const hopTxt = document.createElementNS(SVG_NS, "text");
+        hopTxt.setAttribute("x", String(p.x + radius + 2));
+        hopTxt.setAttribute("y", String(p.y - radius + 4));
+        hopTxt.setAttribute("text-anchor", "middle");
+        hopTxt.setAttribute("font-size", "8.5");
+        hopTxt.setAttribute("font-weight", "700");
+        hopTxt.setAttribute("fill", "#ffffff");
+        hopTxt.textContent = String(hopOrder);
+        g.appendChild(hopCircle);
+        g.appendChild(hopTxt);
+      }
 
       const handleSelectNode = (evt) => {
         evt.stopPropagation();

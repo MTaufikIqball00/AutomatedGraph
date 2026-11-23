@@ -1,0 +1,38 @@
+services:
+  graphrag:
+    build: .
+    container_name: automated-graphrag
+    ports:
+      - "8765:8765"
+    environment:
+      APP_ENV: production
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET (>= 32 random chars) in environment or .env}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8765,http://127.0.0.1:8765}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      SQLITE_DB_PATH: /app/data/graphrag.db
+      GRAPH_BACKEND: sqlite_networkx
+      LLM_PROVIDER: ${LLM_PROVIDER:-local}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-local}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-Admin@GraphRAG2026!}
+    volumes:
+      - graphrag_data:/app/data
+    restart: unless-stopped
+
+  # Stage-2 Enterprise Scale-Out Reference (PostgreSQL + pgvector & Redis for ARQ):
+  # Uncomment when migrating beyond SQLite single-node volume persistence.
+  # postgres:
+  #   image: pgvector/pgvector:pg16
+  #   environment:
+  #     POSTGRES_DB: graphrag
+  #     POSTGRES_USER: graphrag
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+  #   volumes:
+  #     - pg_data:/var/lib/postgresql/data
+  # redis:
+  #   image: redis:7-alpine
+  #   command: ["redis-server", "--appendonly", "yes"]
+
+volumes:
+  graphrag_data:

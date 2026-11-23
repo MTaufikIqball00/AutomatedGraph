@@ -8,26 +8,29 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import sqlite3
 import time
+from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from fastapi import HTTPException, Request, status
+from fastapi import HTTPException, status
 
 from backend.config import Principal, settings
 from backend.database import get_db_connection
+
+logger = logging.getLogger("automated_graphrag.auth")
 
 PBKDF2_ITERATIONS = 310_000
 SESSION_COOKIE_NAME = "graphrag_session"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 
-# In-memory sliding window login rate limiter keyed by (ip, username_lower)
-_LOGIN_ATTEMPTS: Dict[str, List[float]] = {}
 MAX_LOGIN_ATTEMPTS_WINDOW = 5
 LOGIN_WINDOW_SECONDS = 600.0  # 10 minutes
+_DEV_FALLBACK_WARNED = False
 
 
 def utc_now() -> datetime:
@@ -79,15 +82,36 @@ def hash_session_token(raw_token: str) -> str:
 
 def get_session_signing_secret() -> bytes:
     """
-    Derive a deterministic cryptographic key for signing session tokens.
-    Uses SESSION_SECRET env var if set, otherwise deterministically derives
-    from bootstrap admin configuration so all serverless instances (Lambdas)
-    share the exact same signature verification key.
+    Resolve cryptographic key for signing session tokens.
+    - Production (`APP_ENV=production`): fails closed unless SESSION_SECRET (>= 32 chars) is set.
+    - Development / Test: uses SESSION_SECRET if configured, else deterministic dev key with warning.
     """
-    explicit = os.environ.get("SESSION_SECRET") or os.environ.get("SECRET_KEY")
+    global _DEV_FALLBACK_WARNED
+    explicit = (
+        settings.session_secret
+        or os.environ.get("SESSION_SECRET")
+        or os.environ.get("SECRET_KEY")
+        or ""
+    ).strip()
+
+    if settings.is_production:
+        if len(explicit) < 32:
+            raise RuntimeError(
+                "SESSION_SECRET (>= 32 characters) is mandatory when APP_ENV=production."
+            )
+        return explicit.encode("utf-8")
+
     if explicit:
         return explicit.encode("utf-8")
-    seed = f"{settings.initial_admin_password}::{settings.initial_admin_email}::{settings.initial_admin_tenant}::graphrag-session-v1"
+
+    if not _DEV_FALLBACK_WARNED:
+        logger.warning(
+            "SESSION_SECRET not set in %s mode; using deterministic dev signing key (forbidden in production).",
+            settings.app_env,
+        )
+        _DEV_FALLBACK_WARNED = True
+
+    seed = f"{settings.initial_admin_password}::{settings.initial_admin_email}::{settings.initial_admin_tenant}::graphrag-dev-v1"
     return hashlib.sha256(seed.encode("utf-8")).digest()
 
 
@@ -99,28 +123,29 @@ def create_signed_session_token(
     """
     Generate a self-contained, tamper-evident HMAC-SHA256 signed session token.
     Format: v1.<base64url_json_payload>.<hmac_sha256_hex>
-    Contains user identity, tenant, role, and permissions so serverless
-    instances with private /tmp filesystems can authenticate the principal
-    without cross-container database synchronization.
+    Includes `tv` (token_version) so revocations and password resets invalidate
+    previously issued tokens immediately against the database.
     """
     secret = get_session_signing_secret()
+    row_dict = dict(user_row)
     payload: Dict[str, Any] = {
-        "uid": user_row["user_id"],
-        "tid": user_row["tenant_id"],
-        "usr": user_row["username"],
-        "eml": user_row["email"],
-        "fn": user_row["full_name"] if isinstance(user_row, dict) else user_row["full_name"],
-        "rol": user_row["role"],
-        "act": int(user_row["is_active"]) if "is_active" in user_row else 1,
+        "uid": row_dict["user_id"],
+        "tid": row_dict["tenant_id"],
+        "usr": row_dict["username"],
+        "eml": row_dict["email"],
+        "fn": row_dict.get("full_name") or "",
+        "rol": row_dict["role"],
+        "act": int(row_dict.get("is_active", 1)),
+        "tv": int(row_dict.get("token_version", 1)),
         "csrf": csrf_token,
         "exp": expires_iso,
         "rnd": secrets.token_hex(8),
     }
-    raw_docs = user_row["allowed_doc_ids_json"] if "allowed_doc_ids_json" in user_row else None
+    raw_docs = row_dict.get("allowed_doc_ids_json")
     if raw_docs:
         payload["docs"] = raw_docs
-    elif "allowed_doc_ids" in user_row and user_row["allowed_doc_ids"] is not None:
-        payload["docs"] = json.dumps(user_row["allowed_doc_ids"])
+    elif row_dict.get("allowed_doc_ids") is not None:
+        payload["docs"] = json.dumps(row_dict["allowed_doc_ids"])
 
     payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     b64_payload = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("utf-8").rstrip("=")
@@ -160,36 +185,118 @@ def verify_signed_session_token(raw_token: str) -> Optional[Dict[str, Any]]:
     return payload
 
 
-def check_login_rate_limit(ip_addr: str, identifier: str) -> None:
-    """Enforce sliding-window login throttling per IP and account identifier."""
-    now_ts = time.time()
-    for key in (f"ip:{ip_addr}", f"acct:{identifier.lower().strip()}"):
-        timestamps = _LOGIN_ATTEMPTS.get(key, [])
-        recent = [t for t in timestamps if now_ts - t < LOGIN_WINDOW_SECONDS]
-        _LOGIN_ATTEMPTS[key] = recent
-        if len(recent) >= MAX_LOGIN_ATTEMPTS_WINDOW:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Too many failed login attempts. Please wait 10 minutes before trying again.",
-            )
+class RateLimiterStore(ABC):
+    """Abstract sliding-window rate limiter store (supports DB and Redis adapters)."""
+
+    @abstractmethod
+    def check_and_prune(self, bucket_keys: Tuple[str, ...], window_seconds: float, max_attempts: int, db_path: Optional[str] = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def record_failure(self, bucket_keys: Tuple[str, ...], db_path: Optional[str] = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def clear_keys(self, bucket_keys: Tuple[str, ...], db_path: Optional[str] = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def reset_all(self, db_path: Optional[str] = None) -> None:
+        raise NotImplementedError
 
 
-def record_failed_login_attempt(ip_addr: str, identifier: str) -> None:
-    """Record a failed login timestamp for rate limiting."""
-    now_ts = time.time()
-    for key in (f"ip:{ip_addr}", f"acct:{identifier.lower().strip()}"):
-        lst = _LOGIN_ATTEMPTS.setdefault(key, [])
-        lst.append(now_ts)
+class DatabaseRateLimiterStore(RateLimiterStore):
+    """Transactional SQLite/shared-DB sliding-window login rate limiter."""
+
+    def _ensure_schema(self, db_path: Optional[str] = None) -> None:
+        from backend.database import init_db
+        init_db(db_path)
+
+    def check_and_prune(
+        self,
+        bucket_keys: Tuple[str, ...],
+        window_seconds: float,
+        max_attempts: int,
+        db_path: Optional[str] = None,
+    ) -> None:
+        cutoff = time.time() - window_seconds
+        try:
+            with get_db_connection(db_path) as conn:
+                conn.execute("DELETE FROM login_rate_limits WHERE attempt_ts <= ?", (cutoff,))
+                for key in bucket_keys:
+                    cnt = conn.execute(
+                        "SELECT COUNT(*) AS c FROM login_rate_limits WHERE bucket_key = ? AND attempt_ts > ?",
+                        (key, cutoff),
+                    ).fetchone()["c"]
+                    if int(cnt) >= max_attempts:
+                        raise HTTPException(
+                            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many failed login attempts. Please wait 10 minutes before trying again.",
+                        )
+        except sqlite3.OperationalError:
+            self._ensure_schema(db_path)
+
+    def record_failure(self, bucket_keys: Tuple[str, ...], db_path: Optional[str] = None) -> None:
+        now_ts = time.time()
+        rows = [(key, now_ts) for key in bucket_keys]
+        try:
+            with get_db_connection(db_path) as conn:
+                conn.executemany(
+                    "INSERT INTO login_rate_limits (bucket_key, attempt_ts) VALUES (?, ?)",
+                    rows,
+                )
+        except sqlite3.OperationalError:
+            self._ensure_schema(db_path)
+            with get_db_connection(db_path) as conn:
+                conn.executemany(
+                    "INSERT INTO login_rate_limits (bucket_key, attempt_ts) VALUES (?, ?)",
+                    rows,
+                )
+
+    def clear_keys(self, bucket_keys: Tuple[str, ...], db_path: Optional[str] = None) -> None:
+        if not bucket_keys:
+            return
+        try:
+            with get_db_connection(db_path) as conn:
+                placeholders = ",".join("?" for _ in bucket_keys)
+                conn.execute(
+                    f"DELETE FROM login_rate_limits WHERE bucket_key IN ({placeholders})",
+                    tuple(bucket_keys),
+                )
+        except sqlite3.OperationalError:
+            pass
+
+    def reset_all(self, db_path: Optional[str] = None) -> None:
+        try:
+            with get_db_connection(db_path) as conn:
+                conn.execute("DELETE FROM login_rate_limits")
+        except sqlite3.OperationalError:
+            pass
 
 
-def clear_login_rate_limit(ip_addr: str, identifier: str) -> None:
+_RATE_LIMITER: RateLimiterStore = DatabaseRateLimiterStore()
+
+
+def check_login_rate_limit(ip_addr: str, identifier: str, db_path: Optional[str] = None) -> None:
+    """Enforce persistent sliding-window login throttling per IP and account identifier."""
+    keys = (f"ip:{ip_addr}", f"acct:{identifier.lower().strip()}")
+    _RATE_LIMITER.check_and_prune(keys, LOGIN_WINDOW_SECONDS, MAX_LOGIN_ATTEMPTS_WINDOW, db_path=db_path)
+
+
+def record_failed_login_attempt(ip_addr: str, identifier: str, db_path: Optional[str] = None) -> None:
+    """Persist a failed login timestamp for sliding-window rate limiting."""
+    keys = (f"ip:{ip_addr}", f"acct:{identifier.lower().strip()}")
+    _RATE_LIMITER.record_failure(keys, db_path=db_path)
+
+
+def clear_login_rate_limit(ip_addr: str, identifier: str, db_path: Optional[str] = None) -> None:
     """Clear failed login counters for an account upon successful authentication."""
-    _LOGIN_ATTEMPTS.pop(f"acct:{identifier.lower().strip()}", None)
+    _RATE_LIMITER.clear_keys((f"acct:{identifier.lower().strip()}",), db_path=db_path)
 
 
-def reset_rate_limiter_state() -> None:
-    """Clear in-memory rate limit state (used in test fixtures)."""
-    _LOGIN_ATTEMPTS.clear()
+def reset_rate_limiter_state(db_path: Optional[str] = None) -> None:
+    """Clear rate limit state (used in test fixtures)."""
+    _RATE_LIMITER.reset_all(db_path=db_path)
 
 
 def record_audit_event(
@@ -344,14 +451,14 @@ def authenticate_user_credentials(
     Never reveals whether a specific username/email exists on failure.
     """
     clean_id = identifier.strip().lower()
-    check_login_rate_limit(ip_address, clean_id)
+    check_login_rate_limit(ip_address, clean_id, db_path=db_path)
 
     with get_db_connection(db_path) as conn:
         user_row = conn.execute(
             """
             SELECT user_id, tenant_id, username, email, full_name,
                    password_hash, role, is_active, allowed_doc_ids_json,
-                   created_at, updated_at, last_login_at
+                   token_version, created_at, updated_at, last_login_at
             FROM users
             WHERE lower(username) = ? OR lower(email) = ?
             LIMIT 1
@@ -362,7 +469,7 @@ def authenticate_user_credentials(
     # Constant-time dummy check if user does not exist to prevent timing enumeration
     if not user_row:
         verify_password(password, hash_password("dummy-comparison-password-value"))
-        record_failed_login_attempt(ip_address, clean_id)
+        record_failed_login_attempt(ip_address, clean_id, db_path=db_path)
         record_audit_event(
             tenant_id="system",
             actor_user_id="anonymous",
@@ -381,7 +488,7 @@ def authenticate_user_credentials(
         )
 
     if not verify_password(password, user_row["password_hash"]):
-        record_failed_login_attempt(ip_address, clean_id)
+        record_failed_login_attempt(ip_address, clean_id, db_path=db_path)
         record_audit_event(
             tenant_id=user_row["tenant_id"],
             actor_user_id=user_row["user_id"],
@@ -417,7 +524,7 @@ def authenticate_user_credentials(
             detail="Invalid username/email or password.",
         )
 
-    clear_login_rate_limit(ip_address, clean_id)
+    clear_login_rate_limit(ip_address, clean_id, db_path=db_path)
 
     # Generate fresh signed session token and CSRF token (prevents session fixation and supports serverless multi-container dispatch)
     csrf_token = secrets.token_urlsafe(24)
@@ -477,9 +584,16 @@ def resolve_session_principal(
     provided_csrf: Optional[str] = None,
     db_path: Optional[str] = None,
 ) -> Principal:
-    """Validate an active session token against `user_sessions` and `users`."""
+    """Validate an active session token against `user_sessions`, `users.token_version`, and HMAC signature."""
     session_id = hash_session_token(raw_token)
     now_iso = utc_now_iso()
+    signed_payload = verify_signed_session_token(raw_token) if raw_token.startswith("v1.") else None
+
+    if raw_token.startswith("v1.") and signed_payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired session. Please sign in again.",
+        )
 
     try:
         with get_db_connection(db_path) as conn:
@@ -487,7 +601,7 @@ def resolve_session_principal(
                 """
                 SELECT s.session_id, s.csrf_token, s.expires_at, s.revoked_at,
                        u.user_id, u.tenant_id, u.username, u.email, u.full_name,
-                       u.role, u.is_active, u.allowed_doc_ids_json
+                       u.role, u.is_active, u.allowed_doc_ids_json, u.token_version
                 FROM user_sessions s
                 JOIN users u ON u.user_id = s.user_id
                 WHERE s.session_id = ?
@@ -502,7 +616,7 @@ def resolve_session_principal(
                 """
                 SELECT s.session_id, s.csrf_token, s.expires_at, s.revoked_at,
                        u.user_id, u.tenant_id, u.username, u.email, u.full_name,
-                       u.role, u.is_active, u.allowed_doc_ids_json
+                       u.role, u.is_active, u.allowed_doc_ids_json, u.token_version
                 FROM user_sessions s
                 JOIN users u ON u.user_id = s.user_id
                 WHERE s.session_id = ?
@@ -512,7 +626,7 @@ def resolve_session_principal(
 
     # If session not in this container's DB, check if it's a valid signed token
     if not row:
-        payload = verify_signed_session_token(raw_token)
+        payload = signed_payload
         if not payload:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -533,26 +647,38 @@ def resolve_session_principal(
 
             # Check if user exists in local DB
             u_row = conn.execute(
-                "SELECT user_id, tenant_id, username, email, full_name, role, is_active, allowed_doc_ids_json FROM users WHERE user_id = ?",
+                "SELECT user_id, tenant_id, username, email, full_name, role, is_active, allowed_doc_ids_json, token_version FROM users WHERE user_id = ?",
                 (payload["uid"],),
             ).fetchone()
 
             if not u_row:
                 seed_default_users(db_path)
                 u_row = conn.execute(
-                    "SELECT user_id, tenant_id, username, email, full_name, role, is_active, allowed_doc_ids_json FROM users WHERE user_id = ?",
+                    "SELECT user_id, tenant_id, username, email, full_name, role, is_active, allowed_doc_ids_json, token_version FROM users WHERE user_id = ?",
                     (payload["uid"],),
                 ).fetchone()
 
-            if not u_row:
-                # Provision account from verified signed token payload
+            if u_row:
+                # Validate token_version BEFORE provisioning session row
+                if int(payload.get("tv", 1)) != int(u_row["token_version"]):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="Session has been revoked. Please sign in again.",
+                    )
+                if int(u_row["is_active"]) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="User account is deactivated.",
+                    )
+            else:
+                # Serverless fallback: provision account from verified signed token payload
                 conn.execute(
                     """
                     INSERT OR IGNORE INTO users (
                         user_id, tenant_id, username, email, full_name,
                         password_hash, role, is_active, allowed_doc_ids_json,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        token_version, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload["uid"],
@@ -564,6 +690,7 @@ def resolve_session_principal(
                         payload["rol"],
                         payload.get("act", 1),
                         payload.get("docs", '["*"]'),
+                        int(payload.get("tv", 1)),
                         now_iso,
                         now_iso,
                     ),
@@ -593,7 +720,7 @@ def resolve_session_principal(
                 """
                 SELECT s.session_id, s.csrf_token, s.expires_at, s.revoked_at,
                        u.user_id, u.tenant_id, u.username, u.email, u.full_name,
-                       u.role, u.is_active, u.allowed_doc_ids_json
+                       u.role, u.is_active, u.allowed_doc_ids_json, u.token_version
                 FROM user_sessions s
                 JOIN users u ON u.user_id = s.user_id
                 WHERE s.session_id = ?
@@ -608,6 +735,12 @@ def resolve_session_principal(
         )
 
     if row["revoked_at"] is not None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session has been revoked. Please sign in again.",
+        )
+
+    if signed_payload is not None and int(signed_payload.get("tv", 1)) != int(row["token_version"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Session has been revoked. Please sign in again.",
@@ -663,9 +796,17 @@ def revoke_session_by_token(
 def revoke_all_user_sessions(
     tenant_id: str, user_id: str, db_path: Optional[str] = None
 ) -> int:
-    """Revoke all active sessions for a specific user in a tenant."""
+    """Revoke all active sessions for a specific user and increment token_version atomically."""
     now_iso = utc_now_iso()
     with get_db_connection(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET token_version = token_version + 1, updated_at = ?
+            WHERE tenant_id = ? AND user_id = ?
+            """,
+            (now_iso, tenant_id, user_id),
+        )
         cur = conn.execute(
             """
             UPDATE user_sessions
@@ -675,6 +816,92 @@ def revoke_all_user_sessions(
             (now_iso, tenant_id, user_id),
         )
         return int(cur.rowcount)
+
+
+def rotate_user_token_version_for_password_change(
+    tenant_id: str,
+    user_id: str,
+    current_raw_token: Optional[str] = None,
+    ip_address: str = "127.0.0.1",
+    user_agent: str = "",
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """
+    Increment `users.token_version` and revoke all prior sessions on password change.
+    If the caller authenticated via an active session, issues a refreshed signed session
+    with the new `token_version` (preserving its CSRF token so the active tab remains usable).
+    """
+    now = utc_now()
+    now_iso = now.isoformat()
+    preserved_csrf: Optional[str] = None
+    with get_db_connection(db_path) as conn:
+        if current_raw_token:
+            old_sid = hash_session_token(current_raw_token)
+            sess_row = conn.execute(
+                """
+                SELECT csrf_token FROM user_sessions
+                WHERE session_id = ? AND tenant_id = ? AND user_id = ? AND revoked_at IS NULL
+                """,
+                (old_sid, tenant_id, user_id),
+            ).fetchone()
+            if sess_row:
+                preserved_csrf = str(sess_row["csrf_token"])
+
+        conn.execute(
+            """
+            UPDATE users
+            SET token_version = token_version + 1, updated_at = ?
+            WHERE tenant_id = ? AND user_id = ?
+            """,
+            (now_iso, tenant_id, user_id),
+        )
+        conn.execute(
+            """
+            UPDATE user_sessions
+            SET revoked_at = ?
+            WHERE tenant_id = ? AND user_id = ? AND revoked_at IS NULL
+            """,
+            (now_iso, tenant_id, user_id),
+        )
+        user_row = conn.execute(
+            """
+            SELECT user_id, tenant_id, username, email, full_name,
+                   role, is_active, allowed_doc_ids_json, token_version
+            FROM users
+            WHERE tenant_id = ? AND user_id = ?
+            """,
+            (tenant_id, user_id),
+        ).fetchone()
+
+        if not user_row or not preserved_csrf:
+            return None
+
+        expires_iso = (now + timedelta(minutes=settings.session_ttl_minutes)).isoformat()
+        new_raw_token = create_signed_session_token(user_row, preserved_csrf, expires_iso)
+        new_sid = hash_session_token(new_raw_token)
+        conn.execute(
+            """
+            INSERT INTO user_sessions (
+                session_id, user_id, tenant_id, csrf_token,
+                ip_address, user_agent, created_at, expires_at, revoked_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                new_sid,
+                user_row["user_id"],
+                user_row["tenant_id"],
+                preserved_csrf,
+                ip_address,
+                user_agent[:250],
+                now_iso,
+                expires_iso,
+            ),
+        )
+        return {
+            "session_token": new_raw_token,
+            "csrf_token": preserved_csrf,
+            "expires_at": expires_iso,
+        }
 
 
 def get_authorized_doc_ids_for_principal(

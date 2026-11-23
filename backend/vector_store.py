@@ -1,33 +1,36 @@
 """Vector & lexical indexing with tenant isolation and configurable embedding providers."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
 import math
-import re
 from collections import Counter
 from typing import Dict, List, Optional, Tuple
+
 import httpx
 import numpy as np
 
 from backend.config import settings
 from backend.database import get_db_connection
+from backend.nlp_multilingual import (
+    STOPWORDS as STOPWORDS,
+)
+from backend.nlp_multilingual import (
+    TOKEN_RE as TOKEN_RE,
+)
+from backend.nlp_multilingual import (
+    tokenize_multilingual,
+)
 from backend.schemas import ChunkRecord
 
-TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_-]{1,30}")
-STOPWORDS = {
-    "the", "and", "for", "that", "this", "with", "from", "are", "was", "were",
-    "have", "has", "had", "not", "but", "what", "which", "when", "where", "who",
-    "how", "why", "can", "will", "would", "should", "could", "into", "over",
-    "under", "between", "through", "during", "before", "after", "above", "below",
-    "about", "against", "among", "throughout", "despite", "towards", "upon",
-}
+logger = logging.getLogger("automated_graphrag.vector_store")
 
 
 def tokenize_for_search(text: str) -> List[str]:
-    """Tokenize text into normalized content terms for BM25 and semantic hashing."""
-    tokens = TOKEN_RE.findall(text.lower())
-    return [t for t in tokens if t not in STOPWORDS and len(t) >= 2]
+    """Tokenize text into normalized Indonesian + English content terms for BM25 and semantic hashing."""
+    return tokenize_multilingual(text)
 
 
 def compute_local_semantic_embedding(text: str, dim: int = 128) -> List[float]:
@@ -42,7 +45,7 @@ def compute_local_semantic_embedding(text: str, dim: int = 128) -> List[float]:
 
     # Unigrams (weight 1.0)
     for tok in tokens:
-        h = int(hashlib.md5(tok.encode("utf-8")).hexdigest()[:8], 16)
+        h = int(hashlib.md5(tok.encode("utf-8"), usedforsecurity=False).hexdigest()[:8], 16)
         idx = h % dim
         sign = 1.0 if ((h >> 8) & 1) == 0 else -1.0
         vec[idx] += sign * 1.0
@@ -50,19 +53,27 @@ def compute_local_semantic_embedding(text: str, dim: int = 128) -> List[float]:
     # Bigrams (weight 1.25)
     for i in range(len(tokens) - 1):
         bg = f"{tokens[i]}_{tokens[i + 1]}"
-        h = int(hashlib.md5(bg.encode("utf-8")).hexdigest()[:8], 16)
+        h = int(hashlib.md5(bg.encode("utf-8"), usedforsecurity=False).hexdigest()[:8], 16)
         idx = h % dim
         sign = 1.0 if ((h >> 8) & 1) == 0 else -1.0
         vec[idx] += sign * 1.25
 
-    # Character stems / prefixes (weight 0.5) to capture morphological variants
+    # Character stems / prefixes (weight 0.5) & overlapping 4-grams (weight 0.35) for EN+ID affixes
     for tok in tokens:
         if len(tok) >= 5:
             stem = tok[:5]
-            h = int(hashlib.md5(f"stem:{stem}".encode("utf-8")).hexdigest()[:8], 16)
+            h = int(hashlib.md5(f"stem:{stem}".encode("utf-8"), usedforsecurity=False).hexdigest()[:8], 16)
             idx = h % dim
             sign = 1.0 if ((h >> 8) & 1) == 0 else -1.0
             vec[idx] += sign * 0.5
+
+            max_grams = min(len(tok) - 3, 6)
+            for gi in range(max_grams):
+                gram = tok[gi : gi + 4]
+                gh = int(hashlib.md5(f"4g:{gram}".encode("utf-8"), usedforsecurity=False).hexdigest()[:8], 16)
+                gidx = gh % dim
+                gsign = 1.0 if ((gh >> 8) & 1) == 0 else -1.0
+                vec[gidx] += gsign * 0.35
 
     norm = float(np.linalg.norm(vec))
     if norm > 1e-9:
@@ -90,8 +101,8 @@ def embed_text(text: str) -> Tuple[List[float], str]:
                 resp.raise_for_status()
                 vec = resp.json()["data"][0]["embedding"]
                 return vec, f"openai:{settings.openai_embedding_model}"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("OpenAI embedding fallback to local hashing: %s", exc)
 
     if provider == "ollama":
         try:
@@ -104,8 +115,8 @@ def embed_text(text: str) -> Tuple[List[float], str]:
                 vec = resp.json().get("embedding")
                 if isinstance(vec, list) and len(vec) > 0:
                     return vec, f"ollama:{settings.ollama_embedding_model}"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Ollama embedding fallback to local hashing: %s", exc)
 
     return compute_local_semantic_embedding(text, dim=dim), f"local:hash-{dim}d"
 
@@ -122,24 +133,152 @@ def cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
     return float(np.dot(a, b) / denom)
 
 
-def index_chunks_vectors(
+async def embed_texts_batch(
+    texts: List[str],
+    batch_size: int = 32,
+) -> Tuple[List[List[float]], str]:
+    """
+    Compute dense vector embeddings for a list of texts using a single shared httpx.AsyncClient,
+    API batching (OpenAI / Ollama `/api/embed`), bounded concurrency fallback, and exponential backoff.
+    Falls back cleanly to local deterministic embeddings when external APIs are unavailable.
+    """
+    if not texts:
+        return [], f"local:hash-{settings.embedding_dim}d"
+
+    provider = settings.embedding_provider
+    dim = settings.embedding_dim
+
+    if provider == "local":
+        return [compute_local_semantic_embedding(t, dim=dim) for t in texts], f"local:hash-{dim}d"
+
+    async def _post_with_retry(
+        client: httpx.AsyncClient,
+        url: str,
+        payload: Dict[str, object],
+        headers: Optional[Dict[str, str]] = None,
+    ) -> httpx.Response:
+        last_exc: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                    await asyncio.sleep(0.5 * (2**attempt))
+                    continue
+                resp.raise_for_status()
+                return resp
+            except Exception as exc:
+                last_exc = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (2**attempt))
+        raise RuntimeError(f"Embedding batch request failed: {last_exc}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if provider == "openai" and settings.openai_api_key:
+                all_vecs: List[List[float]] = []
+                url = f"{settings.openai_base_url.rstrip('/')}/embeddings"
+                headers = {"Authorization": f"Bearer {settings.openai_api_key}"}
+                for start in range(0, len(texts), batch_size):
+                    batch = texts[start : start + batch_size]
+                    resp = await _post_with_retry(
+                        client,
+                        url,
+                        {"model": settings.openai_embedding_model, "input": batch},
+                        headers=headers,
+                    )
+                    data_items = sorted(resp.json()["data"], key=lambda x: int(x["index"]))
+                    all_vecs.extend(item["embedding"] for item in data_items)
+                return all_vecs, f"openai:{settings.openai_embedding_model}"
+
+            if provider == "ollama":
+                base = settings.ollama_base_url.rstrip("/")
+                try:
+                    all_vecs = []
+                    for start in range(0, len(texts), batch_size):
+                        batch = texts[start : start + batch_size]
+                        resp = await client.post(
+                            f"{base}/api/embed",
+                            json={"model": settings.ollama_embedding_model, "input": batch},
+                        )
+                        if resp.status_code == 404:
+                            raise FileNotFoundError("Ollama /api/embed not supported")
+                        resp.raise_for_status()
+                        embs = resp.json().get("embeddings", [])
+                        if len(embs) != len(batch):
+                            raise ValueError("Mismatched Ollama batch embedding length")
+                        all_vecs.extend(embs)
+                    return all_vecs, f"ollama:{settings.ollama_embedding_model}"
+                except Exception:
+                    sem = asyncio.Semaphore(4)
+
+                    async def _embed_one(text_item: str) -> List[float]:
+                        async with sem:
+                            r = await _post_with_retry(
+                                client,
+                                f"{base}/api/embeddings",
+                                {"model": settings.ollama_embedding_model, "prompt": text_item},
+                            )
+                            vec = r.json().get("embedding")
+                            if not isinstance(vec, list) or not vec:
+                                return compute_local_semantic_embedding(text_item, dim=dim)
+                            return vec
+
+                    vecs = await asyncio.gather(*(_embed_one(t) for t in texts))
+                    return list(vecs), f"ollama:{settings.ollama_embedding_model}"
+    except Exception as exc:
+        logger.debug("Batch embedding fallback to local hashing: %s", exc)
+
+    return [compute_local_semantic_embedding(t, dim=dim) for t in texts], f"local:hash-{dim}d"
+
+
+async def index_chunks_vectors_async(
     tenant_id: str, chunks: List[ChunkRecord], db_path: Optional[str] = None
 ) -> int:
-    """Compute and store embeddings for a batch of chunks in SQLite."""
-    updated = 0
-    with get_db_connection(db_path) as conn:
-        for chk in chunks:
-            vec, model_name = embed_text(f"{chk.section_title}\n{chk.text}")
-            conn.execute(
+    """Compute embeddings in batches using AsyncClient and persist via single bulk executemany."""
+    if not chunks:
+        return 0
+    texts = [f"{chk.section_title}\n{chk.text}" for chk in chunks]
+    vectors, model_name = await embed_texts_batch(texts)
+
+    def _persist_bulk() -> int:
+        rows = [
+            (json.dumps(vec), model_name, tenant_id, chk.chunk_id)
+            for chk, vec in zip(chunks, vectors, strict=True)
+        ]
+        with get_db_connection(db_path) as conn:
+            conn.executemany(
                 """
                 UPDATE chunks
                 SET embedding_json = ?, embedding_model = ?
                 WHERE tenant_id = ? AND chunk_id = ?
                 """,
-                (json.dumps(vec), model_name, tenant_id, chk.chunk_id),
+                rows,
             )
-            updated += 1
-    return updated
+        return len(rows)
+
+    return await asyncio.to_thread(_persist_bulk)
+
+
+def index_chunks_vectors(
+    tenant_id: str, chunks: List[ChunkRecord], db_path: Optional[str] = None
+) -> int:
+    """Compute and store embeddings for a batch of chunks in SQLite using bulk executemany."""
+    if not chunks:
+        return 0
+    rows = []
+    for chk in chunks:
+        vec, model_name = embed_text(f"{chk.section_title}\n{chk.text}")
+        rows.append((json.dumps(vec), model_name, tenant_id, chk.chunk_id))
+    with get_db_connection(db_path) as conn:
+        conn.executemany(
+            """
+            UPDATE chunks
+            SET embedding_json = ?, embedding_model = ?
+            WHERE tenant_id = ? AND chunk_id = ?
+            """,
+            rows,
+        )
+    return len(rows)
 
 
 def search_chunks_hybrid_vector_bm25(

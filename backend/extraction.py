@@ -1,9 +1,11 @@
 """Schema-validated entity and relationship extraction with provenance and confidence."""
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+
 import httpx
 from pydantic import ValidationError
 
@@ -11,57 +13,59 @@ from backend.config import settings
 from backend.schemas import (
     ChunkExtractionResult,
     ChunkRecord,
+    EntityType,
     ExtractedEntity,
     ExtractedRelationship,
-    EntityType,
     RelationshipType,
 )
 
-# High-precision domain patterns for deterministic local extraction
+# High-precision bilingual (English + Indonesian) domain patterns for deterministic local extraction
 KNOWN_ENTITY_PATTERNS: List[Tuple[re.Pattern[str], EntityType]] = [
-    # Dates & Quarters
-    (re.compile(r"\b(Q[1-4]\s+202\d|202\d-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+202\d)\b"), EntityType.DATE),
-    # Metrics & SLAs
-    (re.compile(r"\b(\d+(?:\.\d+)?%\s+(?:uptime|SLA|availability|packet loss|error rate|latency|revenue|reduction|increase)|\$?\d+(?:\.\d+)?\s*(?:million|billion|M|B)\s*(?:USD|penalty|fine|revenue|cost|loss)?|MTTR\s+of\s+\d+\s*(?:minutes|hours)|RTO\s+of\s+\d+\s*(?:minutes|hours))\b", re.IGNORECASE), EntityType.METRIC),
-    # Policies, Standards & Regulations
-    (re.compile(r"\b(ISO/IEC\s+\d+|SOC\s*2\s+Type\s+II|DORA\s+Article\s+\d+|DORA\s+Regulation|GDPR\s+Article\s+\d+|NIST\s+SP\s+800-\d+|PCI-DSS\s+v\d+(?:\.\d+)?|Zero-Trust\s+Mandate\s+[A-Z0-9-]+|Policy\s+[A-Z]{2,5}-\d+)\b"), EntityType.POLICY),
-    # Incidents & Events
-    (re.compile(r"\b(Incident\s+INC-\d{4}-\d+|Outage\s+OUT-\d{4}-\d+|Operation\s+[A-Z][a-zA-Z0-9_-]+|Project\s+[A-Z][a-zA-Z0-9_-]+|Audit\s+AUD-\d{4}-\d+|Migration\s+Wave\s+\d+|CVE-\d{4}-\d{4,7})\b"), EntityType.EVENT),
-    # Systems & Platforms
-    (re.compile(r"\b((?:[A-Z][a-zA-Z0-9_-]*[ \t]+){1,3}(?:Core|Engine|Gateway|Platform|Cluster|Database|Ledger|API|Mesh|Vault|Pipeline|Router|Service|Fabric|Grid)(?:[ \t]+(?:v\d+(?:\.\d+)?|US|UK|EU|APAC))?)\b"), EntityType.SYSTEM),
+    # Dates & Quarters (EN + ID)
+    (re.compile(r"\b(Q[1-4]\s+202\d|Kuartal\s+[1-4]\s+202\d|202\d-\d{2}-\d{2}|(?:January|February|March|April|May|June|July|August|September|October|November|December|Januari|Februari|Maret|Mei|Juni|Juli|Agustus|Oktober|Desember)\s+\d{1,2},?\s+202\d|\d{1,2}\s+(?:Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|Oktober|November|Desember)\s+202\d)\b"), EntityType.DATE),
+    # Metrics & SLAs (EN + ID)
+    (re.compile(r"\b(\d+(?:[.,]\d+)?%\s+(?:uptime|SLA|availability|packet loss|error rate|latency|revenue|reduction|increase|ketersediaan|error|penurunan|kenaikan)|\$?\d+(?:\.\d+)?\s*(?:million|billion|M|B)\s*(?:USD|penalty|fine|revenue|cost|loss)?|Rp\s*\d+(?:[.,]\d+)?\s*(?:juta|miliar|triliun)\s*(?:rupiah|denda|penalti|kerugian|pendapatan|biaya)?|(?:MTTR|RTO)\s+(?:of|sebesar)?\s*\d+\s*(?:minutes|hours|menit|jam))\b", re.IGNORECASE), EntityType.METRIC),
+    # Policies, Standards & Regulations (EN + ID)
+    (re.compile(r"\b(ISO/IEC\s+\d+|SOC\s*2\s+Type\s+II|DORA\s+Article\s+\d+|DORA\s+Regulation|GDPR\s+Article\s+\d+|NIST\s+SP\s+800-\d+|PCI-DSS\s+v\d+(?:\.\d+)?|Zero-Trust\s+Mandate\s+[A-Z0-9-]+|Policy\s+[A-Z]{2,5}-\d+|(?:UU|PP|POJK|Permen|Peraturan|Kebijakan)\s+(?:No\.?\s*)?[A-Z0-9./-]+(?:\s+Tahun\s+20\d{2})?|Pasal\s+\d+[A-Za-z]?)\b"), EntityType.POLICY),
+    # Incidents & Events (EN + ID)
+    (re.compile(r"\b((?:Incident|Insiden|Audit)\s+(?:INC|AUD)-\d{4}-\d+|Outage\s+OUT-\d{4}-\d+|(?:Gangguan|Insiden|Proyek|Operasi)\s+[A-Z][a-zA-Z0-9_-]+|Operation\s+[A-Z][a-zA-Z0-9_-]+|Project\s+[A-Z][a-zA-Z0-9_-]+|Migration\s+Wave\s+\d+|CVE-\d{4}-\d{4,7})\b"), EntityType.EVENT),
+    # Systems & Platforms (EN + ID)
+    (re.compile(r"\b((?:[A-Z][a-zA-Z0-9_-]*[ \t]+){1,3}(?:Core|Engine|Gateway|Platform|Cluster|Database|Ledger|API|Mesh|Vault|Pipeline|Router|Service|Fabric|Grid|Sistem|Gerbang|Mesin|Jaringan)(?:[ \t]+(?:v\d+(?:\.\d+)?|US|UK|EU|APAC|ID))?)\b"), EntityType.SYSTEM),
     # Technologies
-    (re.compile(r"\b(Kubernetes|PostgreSQL\s*\d*|Kafka|Redis|GraphQL|TLS\s*1\.[23]|eBPF|OpenTelemetry|gRPC|Terraform|Neo4j|Qdrant|BGP\s+Anycast)\b"), EntityType.TECHNOLOGY),
-    # Organizations
-    (re.compile(r"\b([A-Z][a-zA-Z0-9&_-]+(?:[ \t]+[A-Z][a-zA-Z0-9&_-]+){0,3}[ \t]+(?:Corp|Corporation|Inc|LLC|Ltd|Systems|Technologies|Labs|Holdings|Bank|Financial|Cloud|Group|Authority|Agency|Networks|Security)(?:[ \t]+(?:Cloud|Systems|Group|Holdings|Corp|Inc|LLC|Ltd))?)\b"), EntityType.ORGANIZATION),
-    # Locations / Regions
-    (re.compile(r"\b(us-east-\d|eu-central-\d|ap-southeast-\d|eu-west-\d|Frankfurt\s+Data\s+Center|Tokyo\s+Region|Northern\s+Virginia\s+Hub|London\s+Metro\s+Zone|Singapore\s+Availability\s+Zone|European\s+Union|United\s+States|United\s+Kingdom)\b"), EntityType.LOCATION),
-    # Persons with Titles/Roles
-    (re.compile(r"\b((?:Dr\.|Prof\.|VP|CTO|CISO|Director|Lead[ \t]+Architect|Chief[ \t]+Risk[ \t]+Officer)[ \t]+[A-Z][a-z]+[ \t]+[A-Z][a-z]+)\b"), EntityType.PERSON),
+    (re.compile(r"\b(Kubernetes|PostgreSQL\s*\d*|Kafka|Redis|GraphQL|TLS\s*1\.[23]|eBPF|OpenTelemetry|gRPC|Terraform|Neo4j|Qdrant|BGP\s+Anycast|pgvector)\b"), EntityType.TECHNOLOGY),
+    # Organizations (EN + ID)
+    (re.compile(r"\b((?:PT|CV|Perum)[ \t]+[A-Z][a-zA-Z0-9&._-]*(?:[ \t]+[A-Z][a-zA-Z0-9&._-]*){0,4}(?:[ \t]+Tbk\.?)?|(?:Kementerian|Otoritas|Badan|Lembaga|Bank)[ \t]+[A-Z][a-zA-Z0-9&_-]*(?:[ \t]+[A-Z][a-zA-Z0-9&_-]*){0,4}|[A-Z][a-zA-Z0-9&_-]+(?:[ \t]+[A-Z][a-zA-Z0-9&_-]+){0,3}[ \t]+(?:Corp|Corporation|Inc|LLC|Ltd|Systems|Technologies|Labs|Holdings|Bank|Financial|Cloud|Group|Authority|Agency|Networks|Security)(?:[ \t]+(?:Cloud|Systems|Group|Holdings|Corp|Inc|LLC|Ltd))?)\b"), EntityType.ORGANIZATION),
+    # Locations / Regions (EN + ID)
+    (re.compile(r"\b(us-east-\d|eu-central-\d|ap-southeast-\d|eu-west-\d|Frankfurt\s+Data\s+Center|Tokyo\s+Region|Northern\s+Virginia\s+Hub|London\s+Metro\s+Zone|Singapore\s+Availability\s+Zone|European\s+Union|United\s+States|United\s+Kingdom|(?:Pusat\s+Data|Wilayah|Zona)\s+[A-Z][a-zA-Z0-9_-]+(?:\s+[A-Z][a-zA-Z0-9_-]+)?|Jakarta\s+(?:Selatan|Pusat|Barat|Timur|Utara))\b"), EntityType.LOCATION),
+    # Persons with Titles/Roles (EN + ID)
+    (re.compile(r"\b((?:Dr\.|Prof\.|Ir\.|VP|CTO|CISO|Director|Direktur|Kepala|Manajer|Lead[ \t]+Architect|Chief[ \t]+Risk[ \t]+Officer)[ \t]+[A-Z][a-z]+[ \t]+[A-Z][a-z]+)\b"), EntityType.PERSON),
 ]
 
 STOP_ENTITY_NAMES = {
     "The", "This", "That", "These", "Those", "However", "Therefore", "Furthermore",
     "In Addition", "Document Overview", "Section", "Summary", "Table", "Figure",
     "Root", "Page", "System", "Service", "Platform", "Company", "Organization",
+    "Ringkasan", "Bagian", "Halaman", "Tabel", "Gambar", "Sistem", "Layanan",
+    "Perusahaan", "Organisasi", "Namun", "Oleh Karena Itu", "Selanjutnya",
 }
 
-# Relationship cue patterns (verb/preposition phrases mapping to RelationshipType)
+# Relationship cue patterns (EN + ID verb/preposition phrases mapping to RelationshipType)
 RELATIONSHIP_CUES: List[Tuple[re.Pattern[str], RelationshipType]] = [
-    (re.compile(r"\b(depends\s+on|relies\s+on|requires|backed\s+by|hosted\s+on|runs\s+on)\b", re.IGNORECASE), RelationshipType.DEPENDS_ON),
-    (re.compile(r"\b(caused\s+by|triggered\s+by|resulted\s+from|stemmed\s+from|induced\s+by|due\s+to)\b", re.IGNORECASE), RelationshipType.CAUSED_BY),
-    (re.compile(r"\b(operates|manages|maintains|administers|controls|hosts)\b", re.IGNORECASE), RelationshipType.OPERATES),
-    (re.compile(r"\b(acquired|purchased|bought|merged\s+with|absorbed)\b", re.IGNORECASE), RelationshipType.ACQUIRED),
-    (re.compile(r"\b(partnered\s+with|collaborated\s+with|contracted\s+with|integrated\s+with|supplied\s+by)\b", re.IGNORECASE), RelationshipType.PARTNERED_WITH),
-    (re.compile(r"\b(regulated\s+by|governed\s+by|audited\s+under|subject\s+to|mandated\s+by|compliant\s+with|violated)\b", re.IGNORECASE), RelationshipType.REGULATED_BY),
-    (re.compile(r"\b(located\s+in|deployed\s+in|hosted\s+in|based\s+in|headquartered\s+in|routed\s+through)\b", re.IGNORECASE), RelationshipType.LOCATED_IN),
-    (re.compile(r"\b(developed\s+by|engineered\s+by|authored\s+by|built\s+by|led\s+by|designed\s+by)\b", re.IGNORECASE), RelationshipType.DEVELOPED_BY),
-    (re.compile(r"\b(impacts|impacted|affected|disrupted|degraded|delayed|damaged|compromised|caused)\b", re.IGNORECASE), RelationshipType.IMPACTS),
-    (re.compile(r"\b(reported|recorded|achieved|incurred|measured|logged|suffered|breached)\b", re.IGNORECASE), RelationshipType.REPORTED_METRIC),
-    (re.compile(r"\b(succeeded\s+by|replaced\s+by|superseded\s+by|upgraded\s+to|migrated\s+to)\b", re.IGNORECASE), RelationshipType.SUCCEEDED_BY),
+    (re.compile(r"\b(depends\s+on|relies\s+on|requires|backed\s+by|hosted\s+on|runs\s+on|bergantung\s+pada|membutuhkan|didukung\s+oleh|berjalan\s+di)\b", re.IGNORECASE), RelationshipType.DEPENDS_ON),
+    (re.compile(r"\b(caused\s+by|triggered\s+by|resulted\s+from|stemmed\s+from|induced\s+by|due\s+to|disebabkan\s+oleh|dipicu\s+oleh|diakibatkan\s+oleh|berasal\s+dari)\b", re.IGNORECASE), RelationshipType.CAUSED_BY),
+    (re.compile(r"\b(operates|manages|maintains|administers|controls|hosts|mengoperasikan|mengelola|memelihara|mengendalikan|dioperasikan\s+oleh)\b", re.IGNORECASE), RelationshipType.OPERATES),
+    (re.compile(r"\b(acquired|purchased|bought|merged\s+with|absorbed|mengakuisisi|diakuisisi\s+oleh|membeli|bergabung\s+dengan)\b", re.IGNORECASE), RelationshipType.ACQUIRED),
+    (re.compile(r"\b(partnered\s+with|collaborated\s+with|contracted\s+with|integrated\s+with|supplied\s+by|bermitra\s+dengan|bekerja\s+sama\s+dengan|terintegrasi\s+dengan)\b", re.IGNORECASE), RelationshipType.PARTNERED_WITH),
+    (re.compile(r"\b(regulated\s+by|governed\s+by|audited\s+under|subject\s+to|mandated\s+by|compliant\s+with|violated|diatur\s+oleh|tunduk\s+pada|diaudit\s+berdasarkan|sesuai\s+dengan|melanggar)\b", re.IGNORECASE), RelationshipType.REGULATED_BY),
+    (re.compile(r"\b(located\s+in|deployed\s+in|hosted\s+in|based\s+in|headquartered\s+in|routed\s+through|berlokasi\s+di|ditempatkan\s+di|berbasis\s+di|berkantor\s+pusat\s+di)\b", re.IGNORECASE), RelationshipType.LOCATED_IN),
+    (re.compile(r"\b(developed\s+by|engineered\s+by|authored\s+by|built\s+by|led\s+by|designed\s+by|dikembangkan\s+oleh|dibangun\s+oleh|dirancang\s+oleh|dipimpin\s+oleh)\b", re.IGNORECASE), RelationshipType.DEVELOPED_BY),
+    (re.compile(r"\b(impacts|impacted|affected|disrupted|degraded|delayed|damaged|compromised|caused|berdampak\s+pada|memengaruhi|mempengaruhi|mengganggu|menyebabkan)\b", re.IGNORECASE), RelationshipType.IMPACTS),
+    (re.compile(r"\b(reported|recorded|achieved|incurred|measured|logged|suffered|breached|melaporkan|mencatat|mencapai|mengalami|mengukur)\b", re.IGNORECASE), RelationshipType.REPORTED_METRIC),
+    (re.compile(r"\b(succeeded\s+by|replaced\s+by|superseded\s+by|upgraded\s+to|migrated\s+to|digantikan\s+oleh|ditingkatkan\s+ke|dimigrasikan\s+ke)\b", re.IGNORECASE), RelationshipType.SUCCEEDED_BY),
 ]
 
 TEMPORAL_CUE_RE = re.compile(
-    r"\b(Q[1-4]\s+202\d|202\d-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+202\d|in\s+202\d)\b",
+    r"\b(Q[1-4]\s+202\d|Kuartal\s+[1-4]\s+202\d|202\d-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Mei|Jun|Jul|Aug|Agu|Sep|Oct|Okt|Nov|Dec|Des)[a-z]*\s+\d{1,2},?\s+202\d|in\s+202\d|pada\s+202\d)\b",
     re.IGNORECASE,
 )
 
@@ -350,3 +354,109 @@ def extract_from_chunk(chunk: ChunkRecord) -> ChunkExtractionResult:
         return fallback
 
     return _extract_local_deterministic(chunk)
+
+
+async def extract_chunks_async(
+    chunks: List[ChunkRecord],
+    max_concurrency: int = 5,
+    on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+) -> List[ChunkExtractionResult]:
+    """
+    Extract entities and relationships across chunks concurrently using a shared httpx.AsyncClient,
+    bounded semaphore, structured JSON mode, retry backoff, and safe deterministic fallback.
+    """
+    total = len(chunks)
+    if total == 0:
+        return []
+
+    provider = settings.llm_provider
+    if provider == "local":
+        results: List[ChunkExtractionResult] = []
+        for idx, chk in enumerate(chunks, start=1):
+            res = await asyncio.to_thread(_extract_local_deterministic, chk)
+            results.append(res)
+            if on_progress is not None:
+                await on_progress(idx, total)
+        return results
+
+    sem = asyncio.Semaphore(max(1, max_concurrency))
+    completed_count = 0
+    progress_lock = asyncio.Lock()
+
+    def _build_prompt(chunk: ChunkRecord) -> str:
+        return (
+            "Extract entities and typed relationships from the text chunk below (supports Indonesian and English).\n"
+            f"Allowed entity_type values: {[e.value for e in EntityType]}\n"
+            f"Allowed relationship_type values: {[r.value for r in RelationshipType]}\n"
+            "Return ONLY valid JSON with keys 'entities' and 'relationships'. Every item MUST include 'evidence_quote' copied verbatim from the chunk.\n\n"
+            f"CHUNK TEXT:\n{chunk.text}"
+        )
+
+    async def _extract_one(client: httpx.AsyncClient, chunk: ChunkRecord) -> ChunkExtractionResult:
+        nonlocal completed_count
+        prompt = _build_prompt(chunk)
+        result: Optional[ChunkExtractionResult] = None
+
+        async with sem:
+            last_exc: Optional[Exception] = None
+            for attempt in range(3):
+                try:
+                    if provider == "openai" and settings.openai_api_key:
+                        resp = await client.post(
+                            f"{settings.openai_base_url.rstrip('/')}/chat/completions",
+                            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                            json={
+                                "model": settings.openai_model,
+                                "messages": [{"role": "user", "content": prompt}],
+                                "temperature": 0.0,
+                                "response_format": {"type": "json_object"},
+                            },
+                        )
+                        if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                            await asyncio.sleep(0.5 * (2**attempt))
+                            continue
+                        resp.raise_for_status()
+                        content = resp.json()["choices"][0]["message"]["content"]
+                        result = validate_raw_llm_extraction_json(chunk, content, provider_name="openai")
+                        break
+                    elif provider == "ollama":
+                        resp = await client.post(
+                            f"{settings.ollama_base_url.rstrip('/')}/api/generate",
+                            json={
+                                "model": settings.ollama_model,
+                                "prompt": prompt,
+                                "stream": False,
+                                "format": "json",
+                            },
+                        )
+                        if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                            await asyncio.sleep(0.5 * (2**attempt))
+                            continue
+                        resp.raise_for_status()
+                        content = resp.json().get("response", "")
+                        result = validate_raw_llm_extraction_json(chunk, content, provider_name="ollama")
+                        break
+                    else:
+                        break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 2:
+                        await asyncio.sleep(0.5 * (2**attempt))
+
+            if result is None:
+                result = await asyncio.to_thread(_extract_local_deterministic, chunk)
+                if last_exc is not None:
+                    result.warnings.append(
+                        f"External provider '{provider}' failed ({last_exc}); used deterministic local extraction fallback."
+                    )
+
+        async with progress_lock:
+            completed_count += 1
+            if on_progress is not None:
+                await on_progress(completed_count, total)
+
+        return result
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        results = await asyncio.gather(*(_extract_one(client, chk) for chk in chunks))
+    return list(results)

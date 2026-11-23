@@ -7,10 +7,10 @@ import io
 import json
 import re
 from typing import Any, Dict, List, Tuple
+
 from pypdf import PdfReader
 
 from backend.schemas import ChunkRecord
-
 
 PAGE_MARKER_RE = re.compile(r"^\s*\[Page\s+(\d+)\]\s*$", re.IGNORECASE)
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")

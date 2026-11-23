@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend-ci:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Run Ruff linter
+        run: ruff check backend api tests
+      - name: Run pytest suite
+        run: pytest -v
+
+  frontend-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Lint frontend JavaScript
+        run: npm run lint:js
+      - name: Build Tailwind CSS and sync public/
+        run: npm run build
+      - name: Verify frontend/ and public/ sync
+        run: |
+          npm run check:sync
+          git diff --exit-code public/ frontend/styles.css
+
+  security-audit-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Verify APP_ENV=production fails closed without SESSION_SECRET
+        env:
+          APP_ENV: production
+          SESSION_SECRET: ""
+        run: |
+          python -c "
+          import sys
+          from backend.config import AppSettings
+          s = AppSettings(APP_ENV='production', SESSION_SECRET='')
+          try:
+              s.validate_production_security()
+              print('ERROR: Production mode did not fail closed!')
+              sys.exit(1)
+          except RuntimeError as exc:
+              print('Verified fail-closed production security check:', exc)
+          "

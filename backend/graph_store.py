@@ -2,14 +2,21 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
+import sqlite3
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
+
 import networkx as nx
 
-from backend.database import get_db_connection
-from backend.entity_resolution import EntityResolver
+from backend.database import get_db_connection, get_db_path
+from backend.entity_resolution import (
+    EntityResolver,
+    compute_pair_signature,
+    normalize_entity_key,
+)
 from backend.schemas import (
     ChunkExtractionResult,
     ChunkRecord,
@@ -59,8 +66,42 @@ class KnowledgeGraphStore:
     - Builds communities using NetworkX greedy modularity and generates global community summaries.
     """
 
+    _GRAPH_CACHE: Dict[Tuple[str, str, Optional[Tuple[str, ...]]], Tuple[int, nx.MultiDiGraph]] = {}
+    _WRITE_VERSIONS: Dict[Tuple[str, str], int] = {}
+    _MAX_CACHE_ENTRIES = 32
+
     def __init__(self, db_path: Optional[str] = None) -> None:
         self.db_path = db_path
+
+    def _resolved_db_key(self) -> str:
+        return str(get_db_path(self.db_path))
+
+    def _invalidate_graph_cache(self, tenant_id: str) -> None:
+        db_key = self._resolved_db_key()
+        vk = (db_key, tenant_id)
+        self._WRITE_VERSIONS[vk] = self._WRITE_VERSIONS.get(vk, 0) + 1
+        stale_keys = [k for k in self._GRAPH_CACHE if k[0] == db_key and k[1] == tenant_id]
+        for k in stale_keys:
+            self._GRAPH_CACHE.pop(k, None)
+
+    def load_resolution_decisions(self, tenant_id: str) -> Dict[str, Dict[str, object]]:
+        """Load persisted entity resolution decisions (`merged` / `kept_distinct`) for a tenant."""
+        decisions: Dict[str, Dict[str, object]] = {}
+        try:
+            with get_db_connection(self.db_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT pair_signature, entity_type, key_a, key_b, decision, canonical_key, decided_by, decided_at
+                    FROM entity_resolution_decisions
+                    WHERE tenant_id = ?
+                    """,
+                    (tenant_id,),
+                ).fetchall()
+            for r in rows:
+                decisions[str(r["pair_signature"])] = dict(r)
+        except Exception:
+            return {}
+        return decisions
 
     def load_existing_entities(self, tenant_id: str) -> List[Dict[str, Any]]:
         """Load all existing entities for a tenant to initialize EntityResolver."""
@@ -91,6 +132,34 @@ class KnowledgeGraphStore:
             )
         return results
 
+    def _prune_orphaned_entities_and_matches(
+        self, conn: sqlite3.Connection, tenant_id: str
+    ) -> None:
+        """Delete orphaned entities with zero mentions and any pending matches referencing missing entities."""
+        conn.execute(
+            """
+            DELETE FROM entities
+            WHERE tenant_id = ?
+              AND entity_id NOT IN (
+                  SELECT DISTINCT entity_id FROM entity_mentions WHERE tenant_id = ?
+              )
+            """,
+            (tenant_id, tenant_id),
+        )
+        conn.execute(
+            """
+            DELETE FROM uncertain_matches
+            WHERE tenant_id = ?
+              AND status = 'pending'
+              AND (
+                  entity_a_id = entity_b_id
+                  OR entity_a_id NOT IN (SELECT entity_id FROM entities WHERE tenant_id = ?)
+                  OR entity_b_id NOT IN (SELECT entity_id FROM entities WHERE tenant_id = ?)
+              )
+            """,
+            (tenant_id, tenant_id, tenant_id),
+        )
+
     def upsert_document_graph_artifacts(
         self,
         tenant_id: str,
@@ -104,24 +173,26 @@ class KnowledgeGraphStore:
         """
         now = utc_now_iso()
         existing_entities = self.load_existing_entities(tenant_id)
-        resolver = EntityResolver(existing_entities=existing_entities, tenant_id=tenant_id)
+        resolution_decisions = self.load_resolution_decisions(tenant_id)
+        resolver = EntityResolver(
+            existing_entities=existing_entities,
+            tenant_id=tenant_id,
+            resolution_decisions=resolution_decisions,
+        )
 
         entity_Count_for_doc = 0
         relationship_count_for_doc = 0
         uncertain_count_for_doc = 0
 
         with get_db_connection(self.db_path) as conn:
-            # Remove prior chunks/mentions/edges for this doc_id to ensure idempotent re-indexing
+            # Remove prior chunks/mentions/edges for idempotent re-indexing; pending uncertain
+            # matches are pruned below only if referenced entities become orphaned.
             conn.execute(
                 "DELETE FROM relationships WHERE tenant_id = ? AND doc_id = ?",
                 (tenant_id, doc_id),
             )
             conn.execute(
                 "DELETE FROM entity_mentions WHERE tenant_id = ? AND doc_id = ?",
-                (tenant_id, doc_id),
-            )
-            conn.execute(
-                "DELETE FROM uncertain_matches WHERE tenant_id = ? AND doc_id = ?",
                 (tenant_id, doc_id),
             )
             conn.execute(
@@ -221,15 +292,21 @@ class KnowledgeGraphStore:
                         ),
                     )
 
-                    # Persist any uncertain entity resolution candidates
+                    # Persist any uncertain entity resolution candidates (without overwriting resolved audit records)
                     for unc in uncertain_list:
-                        conn.execute(
+                        cur = conn.execute(
                             """
-                            INSERT OR REPLACE INTO uncertain_matches (
+                            INSERT INTO uncertain_matches (
                                 match_id, tenant_id, entity_a_id, entity_a_name,
                                 entity_b_id, entity_b_name, entity_type,
-                                similarity_score, reason, doc_id, created_at
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                similarity_score, reason, doc_id, status, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                            ON CONFLICT(tenant_id, match_id) DO UPDATE SET
+                                similarity_score = excluded.similarity_score,
+                                reason = excluded.reason,
+                                doc_id = excluded.doc_id,
+                                created_at = excluded.created_at
+                            WHERE uncertain_matches.status = 'pending'
                             """,
                             (
                                 unc["match_id"],
@@ -245,7 +322,8 @@ class KnowledgeGraphStore:
                                 now,
                             ),
                         )
-                        uncertain_count_for_doc += 1
+                        if cur.rowcount > 0:
+                            uncertain_count_for_doc += 1
 
                 # 3. Persist relationships
                 for rel in ext.relationships:
@@ -286,19 +364,11 @@ class KnowledgeGraphStore:
 
             entity_Count_for_doc = len(doc_entity_ids)
 
-            # Clean up any orphaned entities that no longer have mentions in any document
-            conn.execute(
-                """
-                DELETE FROM entities
-                WHERE tenant_id = ?
-                  AND entity_id NOT IN (
-                      SELECT DISTINCT entity_id FROM entity_mentions WHERE tenant_id = ?
-                  )
-                """,
-                (tenant_id, tenant_id),
-            )
+            # Clean up orphaned entities and pending matches whose entities no longer exist
+            self._prune_orphaned_entities_and_matches(conn, tenant_id)
 
-        # Recompute communities after graph update
+        # Invalidate cache and recompute communities after graph update
+        self._invalidate_graph_cache(tenant_id)
         communities = self.recompute_communities(tenant_id)
         return {
             "chunk_count": len(chunks),
@@ -341,28 +411,29 @@ class KnowledgeGraphStore:
                 "DELETE FROM documents WHERE tenant_id = ? AND doc_id = ?",
                 (tenant_id, doc_id),
             )
-            # Prune orphaned entities that have zero remaining mentions
-            conn.execute(
-                """
-                DELETE FROM entities
-                WHERE tenant_id = ?
-                  AND entity_id NOT IN (
-                      SELECT DISTINCT entity_id FROM entity_mentions WHERE tenant_id = ?
-                  )
-                """,
-                (tenant_id, tenant_id),
-            )
+            # Prune orphaned entities and pending uncertain matches referencing deleted entities
+            self._prune_orphaned_entities_and_matches(conn, tenant_id)
 
+        self._invalidate_graph_cache(tenant_id)
         self.recompute_communities(tenant_id)
         return True
 
     def build_networkx_graph(
         self, tenant_id: str, doc_ids: Optional[List[str]] = None
     ) -> nx.MultiDiGraph:
-        """Construct an in-memory NetworkX MultiDiGraph scoped to the caller's tenant and authorized doc_ids."""
-        G = nx.MultiDiGraph()
+        """Construct an in-memory NetworkX MultiDiGraph scoped to the caller's tenant and authorized doc_ids (with versioned caching)."""
         if doc_ids is not None and len(doc_ids) == 0:
-            return G
+            return nx.MultiDiGraph()
+
+        db_key = self._resolved_db_key()
+        scope_key: Optional[Tuple[str, ...]] = tuple(sorted(set(doc_ids))) if doc_ids is not None else None
+        cache_key = (db_key, tenant_id, scope_key)
+        write_ver = self._WRITE_VERSIONS.get((db_key, tenant_id), 0)
+        cached = self._GRAPH_CACHE.get(cache_key)
+        if cached is not None and cached[0] == write_ver:
+            return cached[1].copy()
+
+        G = nx.MultiDiGraph()
 
         with get_db_connection(self.db_path) as conn:
             ent_rows = conn.execute(
@@ -459,6 +530,11 @@ class KnowledgeGraphStore:
                     temporal_marker=rel["temporal_marker"],
                 )
 
+        if len(self._GRAPH_CACHE) >= self._MAX_CACHE_ENTRIES:
+            oldest_key = next(iter(self._GRAPH_CACHE))
+            self._GRAPH_CACHE.pop(oldest_key, None)
+        self._GRAPH_CACHE[cache_key] = (write_ver, G.copy())
+
         return G
 
     def recompute_communities(self, tenant_id: str) -> List[CommunityView]:
@@ -480,7 +556,7 @@ class KnowledgeGraphStore:
             undirected = nx.Graph()
             for n, data in G.nodes(data=True):
                 undirected.add_node(n, **data)
-            for u, v, data in G.edges(data=True):
+            for u, v, _data in G.edges(data=True):
                 if u != v:
                     undirected.add_edge(u, v)
 
@@ -862,6 +938,8 @@ class KnowledgeGraphStore:
             return GraphPathCitation(
                 path_id=f"pth-{pid_hash}",
                 nodes=[str(G.nodes[n]["canonical_name"]) for n in node_chain],
+                node_ids=list(node_chain),
+                edge_ids=[str(eo["edge_id"]) for eo in edge_objs],
                 edges=edge_objs,
                 path_text=path_str,
                 has_inferred_edge=has_inferred,
@@ -906,3 +984,538 @@ class KnowledgeGraphStore:
             reverse=True,
         )
         return paths_out[:12], supporting_chunk_ids
+
+    def list_authorized_entities(
+        self,
+        tenant_id: str,
+        doc_ids: Optional[List[str]] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Return lightweight entity summaries scoped to authorized doc_ids for explorer dropdowns."""
+        G = self.build_networkx_graph(tenant_id, doc_ids=doc_ids)
+        deg_map = dict(G.degree())
+        items = [
+            {
+                "entity_id": nid,
+                "canonical_name": str(d.get("canonical_name", nid)),
+                "entity_type": str(d.get("entity_type", "CONCEPT")),
+                "degree": int(deg_map.get(nid, 0)),
+            }
+            for nid, d in G.nodes(data=True)
+        ]
+        items.sort(key=lambda x: (-x["degree"], x["canonical_name"].lower()))
+        return items[:limit]
+
+    def find_shortest_paths(
+        self,
+        tenant_id: str,
+        source_entity_id: str,
+        target_entity_id: str,
+        max_hops: int = 4,
+        include_inferred: bool = True,
+        max_paths: int = 3,
+        doc_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Compute shortest paths between two authorized entities within `max_hops`.
+        Builds the ACL-filtered graph BEFORE traversal to guarantee zero hidden-entity leakage,
+        and returns full `path_nodes` / `path_edges` for canvas union-merging.
+        """
+        G = self.build_networkx_graph(tenant_id, doc_ids=doc_ids)
+        if source_entity_id not in G or target_entity_id not in G:
+            return {
+                "found": False,
+                "hop_count": 0,
+                "paths": [],
+                "path_nodes": [],
+                "path_edges": [],
+                "message": "One or both entities were not found within your authorized document scope.",
+            }
+
+        deg_map = dict(G.degree())
+
+        def build_node_view(nid: str) -> GraphNodeView:
+            d = G.nodes[nid]
+            return GraphNodeView(
+                entity_id=nid,
+                canonical_name=str(d["canonical_name"]),
+                entity_type=EntityType(d["entity_type"]),
+                aliases=d.get("aliases", []),
+                description=str(d.get("description", "")),
+                confidence=float(d.get("confidence", 0.85)),
+                degree=int(deg_map.get(nid, 0)),
+                community_id=d.get("community_id"),
+                document_ids=d.get("document_ids", []),
+                mentions=d.get("mentions", []),
+            )
+
+        if source_entity_id == target_entity_id:
+            nv = build_node_view(source_entity_id)
+            return {
+                "found": True,
+                "hop_count": 0,
+                "paths": [],
+                "path_nodes": [nv.model_dump()],
+                "path_edges": [],
+                "message": f"Source and target are the same entity ({nv.canonical_name}).",
+            }
+
+        U = nx.Graph()
+        for n in G.nodes():
+            U.add_node(n)
+        for u, v, edata in G.edges(data=True):
+            if not include_inferred and edata.get("is_inferred"):
+                continue
+            U.add_edge(u, v)
+
+        if not nx.has_path(U, source_entity_id, target_entity_id):
+            src_name = G.nodes[source_entity_id]["canonical_name"]
+            tgt_name = G.nodes[target_entity_id]["canonical_name"]
+            return {
+                "found": False,
+                "hop_count": 0,
+                "paths": [],
+                "path_nodes": [build_node_view(source_entity_id).model_dump(), build_node_view(target_entity_id).model_dump()],
+                "path_edges": [],
+                "message": f"No connected path found between '{src_name}' and '{tgt_name}' with current filters.",
+            }
+
+        raw_chains = list(itertools.islice(nx.all_shortest_paths(U, source_entity_id, target_entity_id), max_paths))
+        shortest_hops = len(raw_chains[0]) - 1 if raw_chains else 0
+        if shortest_hops > max_hops:
+            return {
+                "found": False,
+                "hop_count": shortest_hops,
+                "paths": [],
+                "path_nodes": [build_node_view(source_entity_id).model_dump(), build_node_view(target_entity_id).model_dump()],
+                "path_edges": [],
+                "message": f"Shortest path requires {shortest_hops} hop(s), exceeding max_hops={max_hops}. Increase Max Hops to view it.",
+            }
+
+        def choose_best_edge(a: str, b: str) -> Tuple[Optional[Dict[str, Any]], str]:
+            candidates: List[Tuple[bool, float, Dict[str, Any], str]] = []
+            if G.has_edge(a, b):
+                for _, ed in G[a][b].items():
+                    if not include_inferred and ed.get("is_inferred"):
+                        continue
+                    candidates.append((not bool(ed.get("is_inferred")), float(ed.get("confidence", 0.8)), ed, "->"))
+            if G.has_edge(b, a):
+                for _, ed in G[b][a].items():
+                    if not include_inferred and ed.get("is_inferred"):
+                        continue
+                    candidates.append((not bool(ed.get("is_inferred")), float(ed.get("confidence", 0.8)), ed, "<-"))
+            if not candidates:
+                return None, "->"
+            candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            _, _, best_ed, best_dir = candidates[0]
+            return best_ed, best_dir
+
+        paths_out: List[GraphPathCitation] = []
+        collected_node_ids: Set[str] = set()
+        collected_edges: Dict[str, GraphEdgeView] = {}
+
+        for chain in raw_chains:
+            edge_objs: List[Dict[str, Any]] = []
+            edge_ids: List[str] = []
+            text_segments: List[str] = [str(G.nodes[chain[0]]["canonical_name"])]
+            has_inferred = False
+            min_conf = 1.0
+            doc_set: Set[str] = set()
+            valid_chain = True
+
+            for nid in chain:
+                collected_node_ids.add(nid)
+
+            for i in range(len(chain) - 1):
+                a, b = chain[i], chain[i + 1]
+                chosen_edge, direction = choose_best_edge(a, b)
+                if chosen_edge is None:
+                    valid_chain = False
+                    break
+
+                src_id = a if direction == "->" else b
+                tgt_id = b if direction == "->" else a
+                eid = str(chosen_edge["edge_id"])
+                edge_ids.append(eid)
+                if chosen_edge.get("is_inferred"):
+                    has_inferred = True
+                min_conf = min(min_conf, float(chosen_edge.get("confidence", 0.8)))
+                doc_set.add(str(chosen_edge["doc_id"]))
+
+                rel_label = str(chosen_edge["relationship_type"])
+                if chosen_edge.get("is_inferred"):
+                    rel_label += " (inferred)"
+                if chosen_edge.get("temporal_marker"):
+                    rel_label += f" @{chosen_edge['temporal_marker']}"
+
+                b_name = str(G.nodes[b]["canonical_name"])
+                if direction == "->":
+                    text_segments.append(f"-[{rel_label}]-> {b_name}")
+                else:
+                    text_segments.append(f"<-[{rel_label}]- {b_name}")
+
+                edge_objs.append(
+                    {
+                        "edge_id": eid,
+                        "source_id": src_id,
+                        "target_id": tgt_id,
+                        "source": str(G.nodes[src_id]["canonical_name"]),
+                        "target": str(G.nodes[tgt_id]["canonical_name"]),
+                        "relationship_type": chosen_edge["relationship_type"],
+                        "is_inferred": bool(chosen_edge["is_inferred"]),
+                        "confidence": float(chosen_edge["confidence"]),
+                        "doc_id": chosen_edge["doc_id"],
+                        "filename": chosen_edge.get("filename", ""),
+                        "chunk_id": chosen_edge["chunk_id"],
+                        "evidence_quote": chosen_edge["evidence_quote"],
+                        "temporal_marker": chosen_edge.get("temporal_marker"),
+                    }
+                )
+                if eid not in collected_edges:
+                    collected_edges[eid] = GraphEdgeView(
+                        edge_id=eid,
+                        source_id=src_id,
+                        source_name=str(G.nodes[src_id]["canonical_name"]),
+                        target_id=tgt_id,
+                        target_name=str(G.nodes[tgt_id]["canonical_name"]),
+                        relationship_type=RelationshipType(chosen_edge["relationship_type"]),
+                        is_inferred=bool(chosen_edge["is_inferred"]),
+                        confidence=float(chosen_edge["confidence"]),
+                        doc_id=str(chosen_edge["doc_id"]),
+                        filename=str(chosen_edge.get("filename", "")),
+                        chunk_id=str(chosen_edge["chunk_id"]),
+                        evidence_quote=str(chosen_edge["evidence_quote"]),
+                        char_start=int(chosen_edge.get("char_start", 0)),
+                        char_end=int(chosen_edge.get("char_end", 0)),
+                        temporal_marker=chosen_edge.get("temporal_marker"),
+                    )
+
+            if not valid_chain:
+                continue
+
+            path_str = " ".join(text_segments)
+            pid_hash = hashlib.sha256(path_str.encode("utf-8")).hexdigest()[:10]
+            paths_out.append(
+                GraphPathCitation(
+                    path_id=f"pth-{pid_hash}",
+                    nodes=[str(G.nodes[n]["canonical_name"]) for n in chain],
+                    node_ids=list(chain),
+                    edge_ids=edge_ids,
+                    edges=edge_objs,
+                    path_text=path_str,
+                    has_inferred_edge=has_inferred,
+                    min_confidence=round(min_conf, 3),
+                    source_doc_ids=sorted(doc_set),
+                )
+            )
+
+        path_nodes = [build_node_view(nid).model_dump() for nid in collected_node_ids]
+        path_edges = [ev.model_dump() for ev in collected_edges.values()]
+        return {
+            "found": len(paths_out) > 0,
+            "hop_count": shortest_hops,
+            "paths": [p.model_dump() for p in paths_out],
+            "path_nodes": path_nodes,
+            "path_edges": path_edges,
+            "message": f"Found {len(paths_out)} shortest path(s) spanning {shortest_hops} hop(s).",
+        }
+
+    def resolve_uncertain_match(
+        self,
+        tenant_id: str,
+        match_id: str,
+        action: str,
+        actor_user_id: str,
+        canonical_entity_id: Optional[str] = None,
+        note: str = "",
+        authorized_doc_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Atomically resolve a flagged uncertain entity match via either `merge` or `keep_distinct`.
+        Persists permanent entity resolution decisions and enforces document-level ACL scope.
+        """
+        now = utc_now_iso()
+        auth_set = set(authorized_doc_ids) if authorized_doc_ids is not None else None
+
+        with get_db_connection(self.db_path) as conn:
+            match_row = conn.execute(
+                """
+                SELECT match_id, tenant_id, entity_a_id, entity_a_name,
+                       entity_b_id, entity_b_name, entity_type,
+                       similarity_score, reason, doc_id, status
+                FROM uncertain_matches
+                WHERE tenant_id = ? AND match_id = ?
+                """,
+                (tenant_id, match_id),
+            ).fetchone()
+
+            if not match_row:
+                raise LookupError(f"Uncertain match '{match_id}' was not found.")
+            if str(match_row["status"] or "pending") != "pending":
+                raise RuntimeError(f"Uncertain match '{match_id}' has already been resolved ({match_row['status']}).")
+
+            ent_a_id = str(match_row["entity_a_id"])
+            ent_b_id = str(match_row["entity_b_id"])
+            ent_type_str = str(match_row["entity_type"])
+
+            # Verify caller's ACL covers the flagged document AND all mentions of both candidate entities
+            if auth_set is not None:
+                if str(match_row["doc_id"]) not in auth_set:
+                    raise PermissionError("You are not authorized to resolve matches from this document.")
+                mention_doc_rows = conn.execute(
+                    """
+                    SELECT DISTINCT doc_id FROM entity_mentions
+                    WHERE tenant_id = ? AND entity_id IN (?, ?)
+                    """,
+                    (tenant_id, ent_a_id, ent_b_id),
+                ).fetchall()
+                for mr in mention_doc_rows:
+                    if str(mr["doc_id"]) not in auth_set:
+                        raise PermissionError(
+                            "One or more candidate entities appear in documents outside your authorized ACL scope."
+                        )
+
+            ent_a_row = conn.execute(
+                "SELECT * FROM entities WHERE tenant_id = ? AND entity_id = ?",
+                (tenant_id, ent_a_id),
+            ).fetchone()
+            ent_b_row = conn.execute(
+                "SELECT * FROM entities WHERE tenant_id = ? AND entity_id = ?",
+                (tenant_id, ent_b_id),
+            ).fetchone()
+
+            try:
+                ent_type_enum = EntityType(ent_type_str)
+            except Exception:
+                ent_type_enum = EntityType.CONCEPT
+
+            key_a = str(ent_a_row["normalized_key"]) if ent_a_row else normalize_entity_key(str(match_row["entity_a_name"]), ent_type_enum)
+            key_b = str(ent_b_row["normalized_key"]) if ent_b_row else normalize_entity_key(str(match_row["entity_b_name"]), ent_type_enum)
+            pair_sig = compute_pair_signature(tenant_id, ent_type_str, key_a, key_b)
+
+            if action == "keep_distinct":
+                conn.execute(
+                    """
+                    INSERT INTO entity_resolution_decisions (
+                        tenant_id, pair_signature, entity_type, key_a, key_b,
+                        decision, canonical_key, decided_by, decided_at
+                    ) VALUES (?, ?, ?, ?, ?, 'kept_distinct', NULL, ?, ?)
+                    ON CONFLICT(tenant_id, pair_signature) DO UPDATE SET
+                        decision = 'kept_distinct',
+                        canonical_key = NULL,
+                        decided_by = excluded.decided_by,
+                        decided_at = excluded.decided_at
+                    """,
+                    (tenant_id, pair_sig, ent_type_str, key_a, key_b, actor_user_id, now),
+                )
+                conn.execute(
+                    """
+                    UPDATE uncertain_matches
+                    SET status = 'kept_distinct', resolved_by = ?, resolved_at = ?, resolution_note = ?
+                    WHERE tenant_id = ? AND match_id = ?
+                    """,
+                    (actor_user_id, now, note.strip(), tenant_id, match_id),
+                )
+                return {
+                    "match_id": match_id,
+                    "status": "kept_distinct",
+                    "action": "keep_distinct",
+                    "entity_a_id": ent_a_id,
+                    "entity_b_id": ent_b_id,
+                    "resolved_by": actor_user_id,
+                    "resolved_at": now,
+                }
+
+            # Action == "merge"
+            if not ent_a_row or not ent_b_row:
+                raise ValueError("Cannot merge because one of the candidate entities no longer exists.")
+
+            keep_id = canonical_entity_id or ent_a_id
+            if keep_id not in (ent_a_id, ent_b_id):
+                raise ValueError(
+                    f"canonical_entity_id must be either '{ent_a_id}' or '{ent_b_id}'."
+                )
+            drop_id = ent_b_id if keep_id == ent_a_id else ent_a_id
+            keep_row = ent_a_row if keep_id == ent_a_id else ent_b_row
+            drop_row = ent_b_row if drop_id == ent_b_id else ent_a_row
+
+            # 1. Merge aliases, description, and confidence onto surviving entity
+            keep_aliases = set(json.loads(keep_row["aliases_json"] or "[]"))
+            drop_aliases = set(json.loads(drop_row["aliases_json"] or "[]"))
+            merged_aliases = sorted(
+                (keep_aliases | drop_aliases | {str(drop_row["canonical_name"])})
+                - {str(keep_row["canonical_name"])}
+            )
+            merged_desc = (
+                str(drop_row["description"])
+                if len(str(drop_row["description"] or "")) > len(str(keep_row["description"] or ""))
+                else str(keep_row["description"] or "")
+            )
+            merged_conf = max(float(keep_row["confidence"]), float(drop_row["confidence"]))
+
+            conn.execute(
+                """
+                UPDATE entities
+                SET aliases_json = ?, description = ?, confidence = ?, updated_at = ?
+                WHERE tenant_id = ? AND entity_id = ?
+                """,
+                (json.dumps(merged_aliases), merged_desc, merged_conf, now, tenant_id, keep_id),
+            )
+
+            # 2. Remap mentions cleanly (avoid deterministic mention_id collisions)
+            drop_mentions = conn.execute(
+                """
+                SELECT mention_id, doc_id, chunk_id, surface_form, evidence_quote,
+                       char_start, char_end, confidence
+                FROM entity_mentions
+                WHERE tenant_id = ? AND entity_id = ?
+                """,
+                (tenant_id, drop_id),
+            ).fetchall()
+            for dm in drop_mentions:
+                new_mid = compute_mention_id(tenant_id, keep_id, str(dm["chunk_id"]), int(dm["char_start"]))
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO entity_mentions (
+                        mention_id, tenant_id, entity_id, doc_id, chunk_id,
+                        surface_form, evidence_quote, char_start, char_end, confidence
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_mid,
+                        tenant_id,
+                        keep_id,
+                        dm["doc_id"],
+                        dm["chunk_id"],
+                        dm["surface_form"],
+                        dm["evidence_quote"],
+                        dm["char_start"],
+                        dm["char_end"],
+                        dm["confidence"],
+                    ),
+                )
+            conn.execute(
+                "DELETE FROM entity_mentions WHERE tenant_id = ? AND entity_id = ?",
+                (tenant_id, drop_id),
+            )
+
+            # 3. Remap relationships cleanly (drop self-loops & deduplicate deterministic edge_ids)
+            drop_edges = conn.execute(
+                """
+                SELECT edge_id, source_id, target_id, relationship_type, is_inferred,
+                       confidence, doc_id, chunk_id, evidence_quote,
+                       char_start, char_end, temporal_marker, created_at
+                FROM relationships
+                WHERE tenant_id = ? AND (source_id = ? OR target_id = ?)
+                """,
+                (tenant_id, drop_id, drop_id),
+            ).fetchall()
+            for de in drop_edges:
+                new_src = keep_id if de["source_id"] == drop_id else de["source_id"]
+                new_tgt = keep_id if de["target_id"] == drop_id else de["target_id"]
+                if new_src == new_tgt:
+                    continue
+                new_eid = compute_edge_id(
+                    tenant_id, str(new_src), str(new_tgt), str(de["relationship_type"]), str(de["chunk_id"])
+                )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO relationships (
+                        edge_id, tenant_id, source_id, target_id, relationship_type,
+                        is_inferred, confidence, doc_id, chunk_id, evidence_quote,
+                        char_start, char_end, temporal_marker, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_eid,
+                        tenant_id,
+                        new_src,
+                        new_tgt,
+                        de["relationship_type"],
+                        de["is_inferred"],
+                        de["confidence"],
+                        de["doc_id"],
+                        de["chunk_id"],
+                        de["evidence_quote"],
+                        de["char_start"],
+                        de["char_end"],
+                        de["temporal_marker"],
+                        de["created_at"],
+                    ),
+                )
+            conn.execute(
+                "DELETE FROM relationships WHERE tenant_id = ? AND (source_id = ? OR target_id = ?)",
+                (tenant_id, drop_id, drop_id),
+            )
+
+            # 4. Update other pending uncertain_matches referencing drop_id
+            keep_name = str(keep_row["canonical_name"])
+            conn.execute(
+                """
+                UPDATE uncertain_matches
+                SET entity_a_id = ?, entity_a_name = ?
+                WHERE tenant_id = ? AND match_id != ? AND status = 'pending' AND entity_a_id = ?
+                """,
+                (keep_id, keep_name, tenant_id, match_id, drop_id),
+            )
+            conn.execute(
+                """
+                UPDATE uncertain_matches
+                SET entity_b_id = ?, entity_b_name = ?
+                WHERE tenant_id = ? AND match_id != ? AND status = 'pending' AND entity_b_id = ?
+                """,
+                (keep_id, keep_name, tenant_id, match_id, drop_id),
+            )
+            conn.execute(
+                """
+                UPDATE uncertain_matches
+                SET status = 'merged', resolved_by = ?, resolved_at = ?,
+                    resolution_note = 'Auto-closed after entity merge'
+                WHERE tenant_id = ? AND match_id != ? AND status = 'pending' AND entity_a_id = entity_b_id
+                """,
+                (actor_user_id, now, tenant_id, match_id),
+            )
+
+            # 5. Delete merged entity
+            conn.execute(
+                "DELETE FROM entities WHERE tenant_id = ? AND entity_id = ?",
+                (tenant_id, drop_id),
+            )
+
+            # 6. Persist resolution decision and update target match row
+            conn.execute(
+                """
+                INSERT INTO entity_resolution_decisions (
+                    tenant_id, pair_signature, entity_type, key_a, key_b,
+                    decision, canonical_key, decided_by, decided_at
+                ) VALUES (?, ?, ?, ?, ?, 'merged', ?, ?, ?)
+                ON CONFLICT(tenant_id, pair_signature) DO UPDATE SET
+                    decision = 'merged',
+                    canonical_key = excluded.canonical_key,
+                    decided_by = excluded.decided_by,
+                    decided_at = excluded.decided_at
+                """,
+                (tenant_id, pair_sig, ent_type_str, key_a, key_b, keep_row["normalized_key"], actor_user_id, now),
+            )
+            conn.execute(
+                """
+                UPDATE uncertain_matches
+                SET status = 'merged', resolved_by = ?, resolved_at = ?, resolution_note = ?
+                WHERE tenant_id = ? AND match_id = ?
+                """,
+                (actor_user_id, now, note.strip(), tenant_id, match_id),
+            )
+
+        self._invalidate_graph_cache(tenant_id)
+        self.recompute_communities(tenant_id)
+        return {
+            "match_id": match_id,
+            "status": "merged",
+            "action": "merge",
+            "canonical_entity_id": keep_id,
+            "canonical_name": keep_name,
+            "merged_entity_id": drop_id,
+            "aliases": merged_aliases,
+            "resolved_by": actor_user_id,
+            "resolved_at": now,
+        }

@@ -8,9 +8,14 @@
     "build": "node scripts/build.js",
     "build:css": "npx tailwindcss -i ./frontend/input.css -o ./frontend/styles.css --minify",
     "watch:css": "npx tailwindcss -i ./frontend/input.css -o ./frontend/styles.css --watch",
+    "lint:js": "node --check frontend/app.js && node --check frontend/graph-renderer.js && node --check frontend/ui-components.js && npx eslint frontend/*.js",
+    "check:sync": "node scripts/sync-public.js --check",
     "test": "pytest -v"
   },
   "dependencies": {
     "tailwindcss": "^3.4.17"
+  },
+  "devDependencies": {
+    "eslint": "^10.15.0"
   }
 }

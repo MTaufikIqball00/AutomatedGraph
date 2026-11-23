@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Dict, List, Optional, Tuple
+
 from fastapi import Cookie, Header, HTTPException, Request, status
 
 from backend.auth import (
@@ -12,7 +13,7 @@ from backend.auth import (
     record_audit_event,
     resolve_session_principal,
 )
-from backend.config import Principal, ROLE_PERMISSION_MATRIX, settings
+from backend.config import ROLE_PERMISSION_MATRIX, Principal, settings
 from backend.database import get_db_connection
 from backend.schemas import EntityType, RelationshipType
 
@@ -29,10 +30,11 @@ ALLOWED_EXTENSIONS = {".txt", ".md", ".pdf", ".json", ".csv"}
 
 PROMPT_INJECTION_PATTERNS = [
     re.compile(r"ignore\s+(all\s+)?(previous|prior|above|system)\s+instructions", re.IGNORECASE),
+    re.compile(r"abaikan\s+(semua\s+)?instruksi\s+(sebelumnya|sistem|di\s+atas)", re.IGNORECASE),
     re.compile(r"disregard\s+(all\s+)?(previous|prior|system)\s+(instructions|prompts|rules)", re.IGNORECASE),
     re.compile(r"system\s*prompt\s*override", re.IGNORECASE),
     re.compile(r"you\s+are\s+now\s+(in\s+developer\s+mode|unrestricted|dan\b)", re.IGNORECASE),
-    re.compile(r"(reveal|print|output|exfiltrate|leak)\s+(the\s+)?(api[_\s]?key|secret|password|credentials|system\s+prompt)", re.IGNORECASE),
+    re.compile(r"(reveal|print|output|exfiltrate|leak|tampilkan|bocorkan)\s+(the\s+)?(api[_\s]?key|secret|password|kata\s+sandi|credentials|system\s+prompt)", re.IGNORECASE),
     re.compile(r"<\s*(?:system|admin_override|jailbreak)\s*>", re.IGNORECASE),
     re.compile(r"execute\s+cypher\s*:\s*match\b.*detach\s+delete", re.IGNORECASE),
 ]
@@ -176,7 +178,7 @@ def require_permission(
 
 
 class CypherGuard:
-    """Validates graph query parameters and builds strictly parameterized Cypher statements."""
+    """Graph Query Injection Guard: validates graph query parameters, filters, and parameterized Cypher DSL patterns."""
 
     ALLOWED_LABELS = {e.value for e in EntityType} | {"Entity", "Document", "Chunk", "Community"}
     ALLOWED_REL_TYPES = {r.value for r in RelationshipType} | {

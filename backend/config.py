@@ -1,7 +1,9 @@
 """Configuration management for Automated GraphRAG."""
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Literal, Optional
+
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -38,6 +40,7 @@ ROLE_PERMISSION_MATRIX: Dict[str, List[str]] = {
         "documents:delete",
         "documents:manage_acl",
         "graph:read",
+        "graph:resolve_entities",
         "query:execute",
         "evaluation:run",
         "jobs:read",
@@ -49,6 +52,7 @@ ROLE_PERMISSION_MATRIX: Dict[str, List[str]] = {
         "documents:upload",
         "documents:delete",
         "graph:read",
+        "graph:resolve_entities",
         "query:execute",
         "evaluation:run",
         "jobs:read",
@@ -82,6 +86,13 @@ class AppSettings(BaseSettings):
 
     # Session & Bootstrap User Provisioning Configuration
     session_ttl_minutes: int = Field(default=480, alias="SESSION_TTL_MINUTES")
+    session_secret: str = Field(default="", alias="SESSION_SECRET")
+    enable_dev_quick_login: Optional[bool] = Field(default=None, alias="ENABLE_DEV_QUICK_LOGIN")
+    allowed_origins: str = Field(
+        default="http://127.0.0.1:8765,http://localhost:8765",
+        alias="ALLOWED_ORIGINS",
+    )
+    trust_proxy_headers: bool = Field(default=False, alias="TRUST_PROXY_HEADERS")
     cookie_secure: bool = Field(default=False, alias="COOKIE_SECURE")
     initial_admin_tenant: str = Field(default="tenant-alpha", alias="INITIAL_ADMIN_TENANT")
     initial_admin_username: str = Field(default="admin", alias="INITIAL_ADMIN_USERNAME")
@@ -133,13 +144,10 @@ class AppSettings(BaseSettings):
         default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL"
     )
 
-    # Graph storage backend
-    graph_backend: Literal["sqlite_networkx", "neo4j"] = Field(
+    # Graph storage backend (SQLite ACID persistence + NetworkX property graph)
+    graph_backend: Literal["sqlite_networkx"] = Field(
         default="sqlite_networkx", alias="GRAPH_BACKEND"
     )
-    neo4j_uri: str = Field(default="bolt://127.0.0.1:7687", alias="NEO4J_URI")
-    neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
-    neo4j_password: str = Field(default="", alias="NEO4J_PASSWORD")
 
     # Retrieval & Chunking settings
     chunk_size_chars: int = Field(default=900, alias="CHUNK_SIZE_CHARS")
@@ -147,6 +155,54 @@ class AppSettings(BaseSettings):
     default_top_k_chunks: int = Field(default=6, alias="DEFAULT_TOP_K_CHUNKS")
     default_max_graph_hops: int = Field(default=2, alias="DEFAULT_MAX_GRAPH_HOPS")
     similarity_threshold: float = Field(default=0.08, alias="SIMILARITY_THRESHOLD")
+
+    @property
+    def is_production(self) -> bool:
+        """Return True when running in production mode."""
+        return self.app_env.strip().lower() in {"production", "prod"}
+
+    @property
+    def quick_fill_enabled(self) -> bool:
+        """Never allow quick-fill bootstrap buttons in production mode."""
+        if self.is_production:
+            return False
+        if self.enable_dev_quick_login is not None:
+            return bool(self.enable_dev_quick_login)
+        return True
+
+    @property
+    def effective_cookie_secure(self) -> bool:
+        """Force Secure cookies when APP_ENV=production."""
+        return True if self.is_production else bool(self.cookie_secure)
+
+    def parse_allowed_origins(self) -> List[str]:
+        """Parse and validate explicit CORS origin allowlist."""
+        origins = [o.strip().rstrip("/") for o in self.allowed_origins.split(",") if o.strip()]
+        if "*" in origins:
+            raise ValueError(
+                "Wildcard '*' is not allowed in ALLOWED_ORIGINS when allow_credentials=True."
+            )
+        return origins
+
+    def validate_production_security(self) -> None:
+        """Fail closed at startup or token signing if production security invariants are unmet."""
+        if not self.is_production:
+            return
+        secret = (
+            self.session_secret
+            or os.environ.get("SESSION_SECRET")
+            or os.environ.get("SECRET_KEY")
+            or ""
+        ).strip()
+        if len(secret) < 32:
+            raise RuntimeError(
+                "SESSION_SECRET (>= 32 characters) is mandatory when APP_ENV=production."
+            )
+        origins = self.parse_allowed_origins()
+        if not origins:
+            raise RuntimeError(
+                "ALLOWED_ORIGINS must specify explicit origins when APP_ENV=production."
+            )
 
     def parse_api_keys(self) -> Dict[str, Principal]:
         """Parse AUTH_API_KEYS into a map of api_key -> Principal."""
@@ -158,6 +214,8 @@ class AppSettings(BaseSettings):
             parts = [p.strip() for p in entry.strip().split(":")]
             if len(parts) == 4:
                 key, user_id, tenant_id, role = parts
+                if self.is_production and key.startswith("dev-"):
+                    continue
                 if role in ("admin", "analyst", "viewer") and key:
                     mapping[key] = Principal(
                         user_id=user_id,
@@ -173,6 +231,12 @@ class AppSettings(BaseSettings):
 
     def to_sanitized_dict(self) -> dict:
         """Return safe configuration dictionary with all secrets redacted."""
+        resolved_secret = (
+            self.session_secret
+            or os.environ.get("SESSION_SECRET")
+            or os.environ.get("SECRET_KEY")
+            or ""
+        ).strip()
         return {
             "app_env": self.app_env,
             "llm_provider": self.llm_provider,
@@ -186,8 +250,6 @@ class AppSettings(BaseSettings):
             "ollama_model": self.ollama_model,
             "ollama_embedding_model": self.ollama_embedding_model,
             "graph_backend": self.graph_backend,
-            "neo4j_uri": self.neo4j_uri,
-            "neo4j_password_configured": bool(self.neo4j_password.strip()),
             "chunk_size_chars": self.chunk_size_chars,
             "chunk_overlap_chars": self.chunk_overlap_chars,
             "default_top_k_chunks": self.default_top_k_chunks,
@@ -196,6 +258,11 @@ class AppSettings(BaseSettings):
             "max_upload_size_bytes": self.max_upload_size_bytes,
             "require_auth": self.require_auth,
             "session_ttl_minutes": self.session_ttl_minutes,
+            "session_secret_configured": len(resolved_secret) >= 32,
+            "cookie_secure": self.effective_cookie_secure,
+            "quick_fill_enabled": self.quick_fill_enabled,
+            "allowed_origins": self.parse_allowed_origins(),
+            "trust_proxy_headers": self.trust_proxy_headers,
             "role_permission_matrix": ROLE_PERMISSION_MATRIX,
         }
 

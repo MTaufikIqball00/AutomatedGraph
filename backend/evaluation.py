@@ -187,7 +187,7 @@ def run_comparative_evaluation(
     g_summary = summarize(graphrag_results)
 
     comparisons: List[Dict[str, Any]] = []
-    for v_item, g_item in zip(vector_results, graphrag_results):
+    for v_item, g_item in zip(vector_results, graphrag_results, strict=True):
         comparisons.append(
             {
                 "question_id": v_item["question_id"],

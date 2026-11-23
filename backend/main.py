@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
+import os
 import secrets
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Literal, Optional, Tuple
 
 from fastapi import (
+    BackgroundTasks,
     Cookie,
     Depends,
     FastAPI,
@@ -26,6 +29,7 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.auth import (
@@ -37,6 +41,7 @@ from backend.auth import (
     record_audit_event,
     revoke_all_user_sessions,
     revoke_session_by_token,
+    rotate_user_token_version_for_password_change,
     verify_password,
 )
 from backend.config import ROLE_PERMISSION_MATRIX, Principal, settings
@@ -45,7 +50,13 @@ from backend.demo_fixtures import SYNTHETIC_DEMO_DOCUMENTS
 from backend.evaluation import run_comparative_evaluation
 from backend.generation import synthesize_grounded_answer
 from backend.graph_store import KnowledgeGraphStore, utc_now_iso
-from backend.pipeline import ingest_and_index_document
+from backend.pipeline import (
+    ingest_and_index_document,
+    ingest_and_index_document_async,
+    mark_stale_running_jobs_failed,
+    prepare_queued_document_and_job,
+    run_background_ingestion_job,
+)
 from backend.retrieval import execute_hybrid_retrieval
 from backend.schemas import (
     ConfigUpdateRequest,
@@ -55,6 +66,7 @@ from backend.schemas import (
     PasswordChangeRequest,
     QueryRequest,
     QueryResponse,
+    UncertainMatchResolveRequest,
     UserCreateRequest,
     UserUpdateRequest,
 )
@@ -73,11 +85,98 @@ logging.basicConfig(
 logger = logging.getLogger("automated_graphrag")
 
 
+RUNTIME_SETTING_ALLOWED_KEYS = {
+    "llm_provider",
+    "embedding_provider",
+    "openai_model",
+    "ollama_base_url",
+    "ollama_model",
+    "default_top_k_chunks",
+    "default_max_graph_hops",
+    "similarity_threshold",
+    "chunk_size_chars",
+    "chunk_overlap_chars",
+}
+_RUNTIME_CONFIG_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+RUNTIME_CONFIG_CACHE_TTL_SEC = 5.0
+
+
+def validate_ollama_base_url(raw_url: str) -> str:
+    """Validate ollama_base_url against SSRF targeting cloud metadata or invalid schemes."""
+    cleaned = raw_url.strip().rstrip("/")
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="ollama_base_url must be a valid http:// or https:// URL with a hostname.",
+        )
+    host = parsed.hostname.lower().strip("[]")
+    if host in {"metadata.google.internal", "metadata", "169.254.169.254", "fd00:ec2::254"}:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Blocked disallowed metadata host in ollama_base_url.",
+        )
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        if ip_obj.is_link_local or ip_obj.is_multicast or ip_obj.is_unspecified:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Disallowed link-local, multicast, or unspecified IP address in ollama_base_url.",
+            )
+    except ValueError:
+        pass
+    return cleaned
+
+
+def _get_persisted_runtime_overrides(use_cache: bool = True) -> Dict[str, Any]:
+    """Read runtime configuration overrides from DB `runtime_settings` with short TTL cache."""
+    db_key = str(get_db_path())
+    now_mono = time.monotonic()
+    if use_cache and db_key in _RUNTIME_CONFIG_CACHE:
+        cached_at, cached_vals = _RUNTIME_CONFIG_CACHE[db_key]
+        if now_mono - cached_at < RUNTIME_CONFIG_CACHE_TTL_SEC:
+            return dict(cached_vals)
+
+    overrides: Dict[str, Any] = {}
+    try:
+        with get_db_connection() as conn:
+            rows = conn.execute(
+                "SELECT setting_key, value_json FROM runtime_settings"
+            ).fetchall()
+        for r in rows:
+            k = str(r["setting_key"])
+            if k in RUNTIME_SETTING_ALLOWED_KEYS:
+                overrides[k] = json.loads(r["value_json"])
+    except Exception:
+        return {}
+
+    _RUNTIME_CONFIG_CACHE[db_key] = (now_mono, dict(overrides))
+    return overrides
+
+
+def load_persisted_runtime_config() -> None:
+    """Apply persisted runtime_settings overrides from DB onto runtime settings."""
+    overrides = _get_persisted_runtime_overrides(use_cache=False)
+    for k, v in overrides.items():
+        if hasattr(settings, k):
+            setattr(settings, k, v)
+
+
+def invalidate_runtime_config_cache() -> None:
+    """Clear cached runtime_settings for the active database."""
+    _RUNTIME_CONFIG_CACHE.pop(str(get_db_path()), None)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> Iterator[None]:
-    """Initialize SQLite schema and bootstrap default users on startup."""
+    """Validate production security invariants, initialize SQLite schema, and recover stale jobs."""
+    settings.validate_production_security()
     resolved_path = get_db_path()
     init_db(str(resolved_path))
+    load_persisted_runtime_config()
+    recovered = mark_stale_running_jobs_failed(str(resolved_path))
+    if recovered:
+        logger.warning("Marked %d interrupted indexing job(s) from prior run as failed.", recovered)
     logger.info("Automated GraphRAG database schema initialized at %s", resolved_path)
     yield
 
@@ -95,10 +194,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"https?://.*",
+    allow_origins=settings.parse_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-API-Key"],
 )
 
 
@@ -132,9 +231,27 @@ async def vercel_path_rewrite_middleware(request: Request, call_next):
 
 def _client_ip(request: Request) -> str:
     """Resolve caller IP address safely for rate limiting and audit logging."""
+    if settings.trust_proxy_headers:
+        xff = request.headers.get("x-forwarded-for", "").strip()
+        if xff:
+            first_ip = xff.split(",")[0].strip()
+            if first_ip:
+                return first_ip[:64]
+        real_ip = request.headers.get("x-real-ip", "").strip()
+        if real_ip:
+            return real_ip[:64]
     if request.client and request.client.host:
         return request.client.host
     return "127.0.0.1"
+
+
+@app.get("/api/auth/client-config")
+def get_auth_client_config() -> Dict[str, Any]:
+    """Return non-sensitive client authentication flags (quick-fill disabled in production)."""
+    return {
+        "app_env": settings.app_env,
+        "quick_fill_enabled": settings.quick_fill_enabled,
+    }
 
 
 @app.get("/api/health")
@@ -185,7 +302,7 @@ def login_endpoint(
         value=auth_result["session_token"],
         httponly=True,
         samesite="lax",
-        secure=settings.cookie_secure,
+        secure=settings.effective_cookie_secure,
         max_age=max_age_seconds,
         path="/",
     )
@@ -239,9 +356,12 @@ def logout_endpoint(
 def change_password_endpoint(
     req: PasswordChangeRequest,
     request: Request,
+    response: Response,
+    session_cookie: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE_NAME),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
     principal: Principal = Depends(resolve_principal),
 ) -> Dict[str, Any]:
-    """Verify current password, update to a new hashed password, and log audit event."""
+    """Verify current password, update to a new hashed password, rotate token_version, and log audit event."""
     if req.current_password == req.new_password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -280,6 +400,29 @@ def change_password_endpoint(
             (new_hash, utc_now_iso(), principal.tenant_id, principal.user_id),
         )
 
+    current_token: Optional[str] = session_cookie
+    if not current_token and authorization and authorization.lower().startswith("bearer "):
+        current_token = authorization[7:].strip()
+
+    refreshed = rotate_user_token_version_for_password_change(
+        tenant_id=principal.tenant_id,
+        user_id=principal.user_id,
+        current_raw_token=current_token,
+        ip_address=_client_ip(request),
+        user_agent=request.headers.get("user-agent", ""),
+    )
+    if refreshed:
+        max_age_seconds = max(300, settings.session_ttl_minutes * 60)
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=refreshed["session_token"],
+            httponly=True,
+            samesite="lax",
+            secure=settings.effective_cookie_secure,
+            max_age=max_age_seconds,
+            path="/",
+        )
+
     record_audit_event(
         tenant_id=principal.tenant_id,
         actor_user_id=principal.user_id,
@@ -290,8 +433,13 @@ def change_password_endpoint(
         target_id=principal.user_id,
         status="success",
         ip_address=_client_ip(request),
+        details={"sessions_rotated": True},
     )
-    return {"status": "password_updated"}
+    out: Dict[str, Any] = {"status": "password_updated"}
+    if refreshed:
+        out["session_token"] = refreshed["session_token"]
+        out["csrf_token"] = refreshed["csrf_token"]
+    return out
 
 
 @app.get("/api/auth/whoami")
@@ -817,7 +965,7 @@ def get_overview_metrics(
         uncertain_count = conn.execute(
             f"""
             SELECT COUNT(*) AS c FROM uncertain_matches
-            WHERE tenant_id = ? AND doc_id IN ({placeholders})
+            WHERE tenant_id = ? AND status = 'pending' AND doc_id IN ({placeholders})
             """,
             doc_params,
         ).fetchone()["c"]
@@ -964,16 +1112,27 @@ def list_documents(
     return results
 
 
+def _is_serverless_runtime() -> bool:
+    """Detect ephemeral serverless runtimes (e.g. Vercel/AWS Lambda) where background tasks freeze on return."""
+    return bool(
+        os.environ.get("VERCEL")
+        or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        or os.environ.get("LAMBDA_TASK_ROOT")
+    )
+
+
 @app.post("/api/documents/upload")
 async def upload_document(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     is_synthetic_demo: bool = Form(default=False),
     visibility: str = Form(default="tenant"),
     allowed_roles: Optional[str] = Form(default=None),
+    async_mode: bool = Query(default=False),
     principal: Principal = Depends(resolve_principal),
-) -> Dict[str, Any]:
-    """Validate, ingest, extract, and index an uploaded document with ACL metadata."""
+) -> Any:
+    """Validate, ingest, extract, and index an uploaded document (supports async job queuing)."""
     require_role(principal, ("admin", "analyst"))
     raw_bytes = await file.read()
     filename = file.filename or "uploaded_document.txt"
@@ -990,8 +1149,55 @@ async def upload_document(
         if parsed_roles:
             roles_list = list(dict.fromkeys(["admin"] + parsed_roles))
 
+    if async_mode and not _is_serverless_runtime():
+        queued = prepare_queued_document_and_job(
+            tenant_id=principal.tenant_id,
+            filename=filename,
+            raw_bytes=raw_bytes,
+            mime_type=file.content_type or "text/plain",
+            is_synthetic_demo=is_synthetic_demo,
+            owner_user_id=principal.user_id,
+            visibility=vis_clean,
+            allowed_roles=roles_list,
+        )
+        background_tasks.add_task(
+            run_background_ingestion_job,
+            tenant_id=principal.tenant_id,
+            filename=filename,
+            raw_bytes=raw_bytes,
+            mime_type=file.content_type or "text/plain",
+            is_synthetic_demo=is_synthetic_demo,
+            owner_user_id=principal.user_id,
+            visibility=vis_clean,
+            allowed_roles=roles_list,
+            job_id=queued["job_id"],
+        )
+        record_audit_event(
+            tenant_id=principal.tenant_id,
+            actor_user_id=principal.user_id,
+            actor_username=principal.username,
+            actor_role=principal.role,
+            action="documents.upload.queued",
+            target_type="document",
+            target_id=queued["doc_id"],
+            status="success",
+            ip_address=_client_ip(request),
+            details={"job_id": queued["job_id"], "filename": filename, "visibility": vis_clean},
+        )
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={
+                "job_id": queued["job_id"],
+                "doc_id": queued["doc_id"],
+                "filename": filename,
+                "status": "queued",
+                "visibility": vis_clean,
+                "allowed_roles": roles_list,
+            },
+        )
+
     try:
-        result = ingest_and_index_document(
+        result = await ingest_and_index_document_async(
             tenant_id=principal.tenant_id,
             filename=filename,
             raw_bytes=raw_bytes,
@@ -1072,7 +1278,7 @@ def update_document_acl(
 
     with get_db_connection() as conn:
         doc = conn.execute(
-            "SELECT doc_id, filename, owner_user_id FROM documents WHERE tenant_id = ? AND doc_id = ?",
+            "SELECT doc_id, filename, owner_user_id, allowed_user_ids_json FROM documents WHERE tenant_id = ? AND doc_id = ?",
             (t_id, doc_id),
         ).fetchone()
         if not doc:
@@ -1100,6 +1306,33 @@ def update_document_acl(
         if "admin" not in valid_roles:
             valid_roles.insert(0, "admin")
 
+        if req.allowed_user_ids is None:
+            try:
+                raw_existing = json.loads(doc["allowed_user_ids_json"] or "[]")
+                final_allowed_users = [
+                    str(u).strip() for u in (raw_existing if isinstance(raw_existing, list) else []) if str(u).strip()
+                ]
+            except Exception:
+                final_allowed_users = []
+        else:
+            cleaned_users = list(
+                dict.fromkeys(str(u).strip() for u in req.allowed_user_ids if str(u).strip())
+            )
+            if cleaned_users:
+                placeholders = ",".join("?" for _ in cleaned_users)
+                valid_rows = conn.execute(
+                    f"SELECT user_id FROM users WHERE tenant_id = ? AND user_id IN ({placeholders})",
+                    (t_id, *cleaned_users),
+                ).fetchall()
+                valid_set = {str(r["user_id"]) for r in valid_rows}
+                invalid_users = [u for u in cleaned_users if u not in valid_set]
+                if invalid_users:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail=f"Invalid or cross-tenant user ID(s) in allowed_user_ids: {invalid_users}",
+                    )
+            final_allowed_users = cleaned_users
+
         conn.execute(
             """
             UPDATE documents
@@ -1109,7 +1342,7 @@ def update_document_acl(
             (
                 req.visibility,
                 json.dumps(valid_roles),
-                json.dumps(req.allowed_user_ids),
+                json.dumps(final_allowed_users),
                 utc_now_iso(),
                 t_id,
                 doc_id,
@@ -1129,7 +1362,7 @@ def update_document_acl(
         details={
             "visibility": req.visibility,
             "allowed_roles": valid_roles,
-            "allowed_user_ids": req.allowed_user_ids,
+            "allowed_user_ids": final_allowed_users,
         },
     )
     return {
@@ -1137,7 +1370,7 @@ def update_document_acl(
         "doc_id": doc_id,
         "visibility": req.visibility,
         "allowed_roles": valid_roles,
-        "allowed_user_ids": req.allowed_user_ids,
+        "allowed_user_ids": final_allowed_users,
     }
 
 
@@ -1317,8 +1550,56 @@ def list_communities(
     return [c.model_dump() for c in store.get_communities(principal.tenant_id, doc_ids=auth_doc_ids)]
 
 
+@app.get("/api/graph/entities")
+def list_graph_entities(
+    limit: int = Query(default=200, ge=1, le=500),
+    principal: Principal = Depends(resolve_principal),
+) -> List[Dict[str, Any]]:
+    """List canonical entities within the caller's authorized document scope (for Path Finder controls)."""
+    require_permission(principal, "graph:read")
+    auth_doc_ids = get_authorized_doc_ids_for_principal(principal)
+    store = KnowledgeGraphStore()
+    return store.list_authorized_entities(
+        tenant_id=principal.tenant_id,
+        doc_ids=auth_doc_ids,
+        limit=limit,
+    )
+
+
+@app.get("/api/graph/shortest-path")
+def get_shortest_graph_path(
+    source_id: str = Query(..., min_length=2, max_length=100),
+    target_id: str = Query(..., min_length=2, max_length=100),
+    max_hops: int = Query(default=4, ge=1, le=6),
+    include_inferred: bool = Query(default=True),
+    principal: Principal = Depends(resolve_principal),
+) -> Dict[str, Any]:
+    """Find shortest multi-hop provenance paths between two authorized entities."""
+    require_permission(principal, "graph:read")
+    try:
+        CypherGuard.assert_safe_parameter_value(source_id)
+        CypherGuard.assert_safe_parameter_value(target_id)
+        CypherGuard.reject_raw_cypher(source_id)
+        CypherGuard.reject_raw_cypher(target_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    auth_doc_ids = get_authorized_doc_ids_for_principal(principal)
+    store = KnowledgeGraphStore()
+    return store.find_shortest_paths(
+        tenant_id=principal.tenant_id,
+        source_entity_id=source_id.strip(),
+        target_entity_id=target_id.strip(),
+        max_hops=max_hops,
+        include_inferred=include_inferred,
+        max_paths=3,
+        doc_ids=auth_doc_ids,
+    )
+
+
 @app.get("/api/graph/uncertain-matches")
 def list_uncertain_matches(
+    status_filter: Literal["pending", "resolved", "all"] = Query(default="pending", alias="status"),
     principal: Principal = Depends(resolve_principal),
 ) -> List[Dict[str, Any]]:
     """Return tracked uncertain entity resolution pairs scoped to authorized documents."""
@@ -1327,19 +1608,89 @@ def list_uncertain_matches(
     if not auth_doc_ids:
         return []
     placeholders = ",".join("?" for _ in auth_doc_ids)
+    status_sql = ""
+    if status_filter == "pending":
+        status_sql = " AND status = 'pending'"
+    elif status_filter == "resolved":
+        status_sql = " AND status != 'pending'"
+
     with get_db_connection() as conn:
         rows = conn.execute(
             f"""
             SELECT match_id, tenant_id, entity_a_id, entity_a_name,
                    entity_b_id, entity_b_name, entity_type,
-                   similarity_score, reason, doc_id, created_at
+                   similarity_score, reason, doc_id, status,
+                   resolved_by, resolved_at, resolution_note, created_at
             FROM uncertain_matches
-            WHERE tenant_id = ? AND doc_id IN ({placeholders})
+            WHERE tenant_id = ? AND doc_id IN ({placeholders}){status_sql}
             ORDER BY similarity_score DESC
             """,
             (principal.tenant_id, *auth_doc_ids),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.post("/api/graph/uncertain-matches/{match_id}/resolve")
+def resolve_uncertain_match_endpoint(
+    match_id: str,
+    req: UncertainMatchResolveRequest,
+    request: Request,
+    principal: Principal = Depends(resolve_principal),
+) -> Dict[str, Any]:
+    """Approve merging two candidate entities or mark them permanently distinct (Admin/Analyst)."""
+    require_role(principal, ("admin", "analyst"), action_name="resolve_uncertain_match", target_id=match_id)
+    require_permission(principal, "graph:resolve_entities", target_id=match_id)
+    auth_doc_ids = get_authorized_doc_ids_for_principal(principal)
+    store = KnowledgeGraphStore()
+    try:
+        result = store.resolve_uncertain_match(
+            tenant_id=principal.tenant_id,
+            match_id=match_id,
+            action=req.action,
+            actor_user_id=principal.user_id,
+            canonical_entity_id=req.canonical_entity_id,
+            note=req.note,
+            authorized_doc_ids=auth_doc_ids,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        record_audit_event(
+            tenant_id=principal.tenant_id,
+            actor_user_id=principal.user_id,
+            actor_username=principal.username,
+            actor_role=principal.role,
+            action="graph.uncertain_match.resolve",
+            target_type="uncertain_match",
+            target_id=match_id,
+            status="denied",
+            ip_address=_client_ip(request),
+            details={"reason": str(exc)},
+        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    record_audit_event(
+        tenant_id=principal.tenant_id,
+        actor_user_id=principal.user_id,
+        actor_username=principal.username,
+        actor_role=principal.role,
+        action="graph.uncertain_match.resolve",
+        target_type="uncertain_match",
+        target_id=match_id,
+        status="success",
+        ip_address=_client_ip(request),
+        details={
+            "action": req.action,
+            "canonical_entity_id": result.get("canonical_entity_id"),
+            "merged_entity_id": result.get("merged_entity_id"),
+            "note": req.note.strip(),
+        },
+    )
+    return result
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -1497,6 +1848,30 @@ def list_jobs(
     return out
 
 
+@app.get("/api/jobs/{job_id}")
+def get_job_status(
+    job_id: str,
+    principal: Principal = Depends(resolve_principal),
+) -> Dict[str, Any]:
+    """Retrieve status and stage progress for a specific tenant-scoped pipeline job."""
+    require_permission(principal, "jobs:read")
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT job_id, tenant_id, doc_id, job_type, status, stage,
+                   progress_pct, details_json, error_message, started_at, finished_at
+            FROM jobs
+            WHERE tenant_id = ? AND job_id = ?
+            """,
+            (principal.tenant_id, job_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Pipeline job not found in tenant scope.")
+    d = dict(row)
+    d["details"] = json.loads(d.pop("details_json", "{}") or "{}")
+    return d
+
+
 @app.get("/api/observability/logs")
 def list_query_logs(
     limit: int = Query(default=30, ge=1, le=100),
@@ -1531,8 +1906,13 @@ def get_sanitized_config(
 ) -> Dict[str, Any]:
     """Return sanitized runtime configuration (never exposes secrets or API keys)."""
     require_permission(principal, "config:read")
+    cfg = settings.to_sanitized_dict()
+    overrides = _get_persisted_runtime_overrides(use_cache=True)
+    for k, v in overrides.items():
+        if k in cfg:
+            cfg[k] = v
     return {
-        "config": settings.to_sanitized_dict(),
+        "config": cfg,
         "caller": principal.model_dump(),
     }
 
@@ -1543,12 +1923,37 @@ def update_runtime_config(
     request: Request,
     principal: Principal = Depends(resolve_principal),
 ) -> Dict[str, Any]:
-    """Update supported runtime model, embedding, and retrieval settings (Admin role required)."""
+    """Update and persist supported runtime model, embedding, and retrieval settings (Admin role required)."""
     require_role(principal, ("admin",))
     update_data = req.model_dump(exclude_none=True)
-    for k, v in update_data.items():
-        if hasattr(settings, k):
-            setattr(settings, k, v)
+    if "ollama_base_url" in update_data:
+        update_data["ollama_base_url"] = validate_ollama_base_url(str(update_data["ollama_base_url"]))
+
+    now = utc_now_iso()
+    with get_db_connection() as conn:
+        for k, v in update_data.items():
+            if k in RUNTIME_SETTING_ALLOWED_KEYS:
+                conn.execute(
+                    """
+                    INSERT INTO runtime_settings (setting_key, value_json, updated_by, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(setting_key) DO UPDATE SET
+                        value_json = excluded.value_json,
+                        updated_by = excluded.updated_by,
+                        updated_at = excluded.updated_at
+                    """,
+                    (k, json.dumps(v), principal.user_id, now),
+                )
+            if hasattr(settings, k):
+                setattr(settings, k, v)
+
+    invalidate_runtime_config_cache()
+    cfg = settings.to_sanitized_dict()
+    overrides = _get_persisted_runtime_overrides(use_cache=False)
+    for k, v in overrides.items():
+        if k in cfg:
+            cfg[k] = v
+
     record_audit_event(
         tenant_id=principal.tenant_id,
         actor_user_id=principal.user_id,
@@ -1563,7 +1968,7 @@ def update_runtime_config(
     )
     return {
         "status": "updated",
-        "config": settings.to_sanitized_dict(),
+        "config": cfg,
     }
 
 

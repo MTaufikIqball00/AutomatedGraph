@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -80,11 +81,11 @@ class UserUpdateRequest(BaseModel):
 
 class DocumentACLUpdateRequest(BaseModel):
     """Update document-level visibility and role/user access control lists."""
-    visibility: Literal["tenant", "restricted"] = "tenant"
+    visibility: Literal["tenant", "restricted", "private"] = "tenant"
     allowed_roles: List[Literal["admin", "analyst", "viewer"]] = Field(
         default_factory=lambda: ["admin", "analyst", "viewer"]
     )
-    allowed_user_ids: List[str] = Field(default_factory=list)
+    allowed_user_ids: Optional[List[str]] = None
 
 
 class ChunkRecord(BaseModel):
@@ -250,11 +251,20 @@ class GraphPathCitation(BaseModel):
     """Traceable knowledge graph path backing a generated response."""
     path_id: str
     nodes: List[str]
+    node_ids: List[str] = Field(default_factory=list)
+    edge_ids: List[str] = Field(default_factory=list)
     edges: List[Dict[str, Any]]
     path_text: str
     has_inferred_edge: bool
     min_confidence: float
     source_doc_ids: List[str]
+
+
+class UncertainMatchResolveRequest(BaseModel):
+    """Payload to interactively approve merging or keeping an uncertain entity match distinct."""
+    action: Literal["merge", "keep_distinct"]
+    canonical_entity_id: Optional[str] = None
+    note: str = Field(default="", max_length=300)
 
 
 class QueryRequest(BaseModel):
